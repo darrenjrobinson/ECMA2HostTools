@@ -1,0 +1,10 @@
+<?xml version="1.0"?>
+<Configuration>
+  <Connectors>
+    <Connector>
+      <ECMAConfig><ProfileName>Test</ProfileName><LibraryName>Lib</LibraryName><ECMAFolderPath>C:\Test</ECMAFolderPath><AutosyncTimer>60</AutosyncTimer><Validated>true</Validated><ProfileDescription>Test</ProfileDescription><CreationDateTime>1/1/2025</CreationDateTime><ModificationDateTime>1/1/2025</ModificationDateTime></ECMAConfig>
+      <ConnectorConfig><Parameters><Parameter><Name>Password</Name><Type>EncryptedString</Type><Use>Connectivity</Use><Encrypted>true</Encrypted><Value>enc</Value></Parameter></Parameters><IsExportSupported>true</IsExportSupported><IsFullImportSupported>true</IsFullImportSupported><IsDeltaImportSupported>true</IsDeltaImportSupported><IsExportOnly>false</IsExportOnly></ConnectorConfig>
+      <Schema><EntriesSchema><EntrySchema><ObjectType>user</ObjectType></EntrySchema></EntriesSchema></Schema>
+    </Connector>
+  </Connectors>
+</Configuration>

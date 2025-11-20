@@ -1,0 +1,39 @@
+# Build artifacts
+*.zip
+build/
+dist/
+
+# PowerShell
+*.ps1xml~
+*.psd1~
+*.psm1~
+
+# Test results
+TestResults.xml
+coverage.xml
+
+# IDE
+.vscode/
+.vs/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+temp/
+tmp/
+*.tmp
+
+# Sensitive data (in case any accidentally created)
+# Note: Cmdlet files like Get-ECMA2ConnectorSecret.ps1 are NOT excluded
+*.secrets
+*secret.txt
+*password.txt
+Configuration.xml

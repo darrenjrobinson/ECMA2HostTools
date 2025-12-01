@@ -144,8 +144,8 @@ function Invoke-ECMA2ConnectorRequest {
         [ValidateSet('POST', 'PUT', 'PATCH', 'DELETE')]
         [string]$Method = 'POST',
 
-        [Parameter(Mandatory, ParameterSetName = 'Direct')]
-        [Parameter(Mandatory, ParameterSetName = 'Pipeline')]
+        [Parameter(ParameterSetName = 'Direct')]
+        [Parameter(ParameterSetName = 'Pipeline')]
         [AllowNull()]
         [object]$Body,
 

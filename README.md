@@ -14,7 +14,50 @@ This module provides a comprehensive set of cmdlets for managing the ECMA2Host s
 - **Configuration Management**: Export and import connector configurations
 - **Remote Management**: Support for managing ECMA2Host on remote computers
 
+## Why Use ECMA2HostTools?
+
+- **Simplified Authentication**: No need to manually manage secret tokens - the module automatically decrypts and retrieves them from your connector configuration
+- **Query Connector Caches**: Directly query ECMA2Host connector caches using SCIM protocol without needing Microsoft Entra provisioning service
+- **Real-time Monitoring**: Get live connector status, run history, and object counts to monitor provisioning operations
+- **Automation-Ready**: Automate connector management, validation, and reporting tasks with PowerShell scripts
+- **Comprehensive Object Access**: Retrieve, filter, and analyze connector objects with full attribute access and PowerShell filtering capabilities
+- **Configuration Management**: Easily backup, export, import, and restore connector configurations for disaster recovery or environment migrations
+- **Self-Service Diagnostics**: Troubleshoot connector issues without requiring access to the ECMA2Host Configuration Wizard
+
 ## Installation
+
+### Recommended: PowerShell Gallery
+
+Install directly from the PowerShell Gallery (recommended method):
+
+```powershell
+# Install for current user
+Install-Module -Name ECMA2HostTools -Scope CurrentUser
+
+# Install for all users (requires Administrator)
+Install-Module -Name ECMA2HostTools -Scope AllUsers
+
+# Import the module
+Import-Module ECMA2HostTools
+```
+
+### Download from GitHub
+
+Download the source code from GitHub:
+
+1. Visit the [repository](https://github.com/darrenjrobinson/ECMA2HostTools)
+2. Click the green **Code** button
+3. Select **Download ZIP**
+4. Extract the ZIP file to a temporary location
+5. Continue with Manual Installation steps below
+
+Or clone the repository:
+
+```powershell
+# Clone the repository
+git clone https://github.com/darrenjrobinson/ECMA2HostTools.git
+cd ECMA2HostTools
+```
 
 ### Manual Installation
 
@@ -24,11 +67,16 @@ This module provides a comprehensive set of cmdlets for managing the ECMA2Host s
    ```
 
 2. Common locations:
-   - Current User: `$HOME\Documents\PowerShell\Modules`
-   - All Users: `C:\Program Files\PowerShell\Modules`
+   - Current User: `$HOME\Documents\PowerShell\Modules\ECMA2HostTools`
+   - All Users: `C:\Program Files\PowerShell\Modules\ECMA2HostTools`
 
-3. Import the module:
+3. Example manual installation:
    ```powershell
+   # Copy to current user modules folder
+   $modulePath = "$HOME\Documents\PowerShell\Modules\ECMA2HostTools"
+   Copy-Item -Path ".\ECMA2HostTools" -Destination $modulePath -Recurse -Force
+   
+   # Import the module
    Import-Module ECMA2HostTools
    ```
 
@@ -45,6 +93,7 @@ This module provides a comprehensive set of cmdlets for managing the ECMA2Host s
 - `Get-ECMA2ConnectorSecret` - Decrypts encrypted parameters and secret tokens from connectors
 - `Get-ECMA2ConnectorObjects` - Retrieves objects from a connector's cache using SCIM queries
 - `Get-ECMA2ConnectorStatus` - Gets the status of an ECMA2 connector
+- `Invoke-ECMA2ConnectorRequest` - Sends SCIM requests (create/update/delete) to an ECMA2 connector
 
 ### Run Profile Monitoring
 - `Get-ECMA2ConnectorRunHistory` - Gets the run history for a connector
@@ -249,17 +298,17 @@ Get-ECMA2ConnectorRunHistory -Last 50 |
 
 > **Important**: ECMA2Host filtering is limited to exact matches only. The `-FilterAttribute` and `-FilterValue` parameters only support the SCIM `eq` (equals) operator. Wildcard patterns, partial matching (starts with, ends with, contains), and other comparison operators are not supported by ECMA2Host.
 >
-> **Recommendation**: For complex filtering, retrieve a broader set of results using `-GetAll` and then use PowerShell's filtering capabilities (`Where-Object`, `-like`, `-match`, `-gt`, etc.) to find specific objects.
+> **Recommendation**: For complex filtering, retrieve all objects (default behavior) and then use PowerShell's filtering capabilities (`Where-Object`, `-like`, `-match`, `-gt`, etc.) to find specific objects. Use `-Limit` to restrict results when testing or working with large connectors.
 
 ```powershell
 # Get all objects from a connector (automatically retrieves all pages)
 $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
-Get-ECMA2Connector -Name "LDAPConnector" | Get-ECMA2ConnectorObjects -SecretToken $secret -GetAll
+Get-ECMA2Connector -Name "LDAPConnector" | Get-ECMA2ConnectorObjects -SecretToken $secret
 
 # Combine cmdlets in pipeline to get objects with custom formatting
 $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
 Get-ECMA2Connector -Name "LDAPConnector" | 
-    Get-ECMA2ConnectorObjects -SecretToken $secret -GetAll | 
+    Get-ECMA2ConnectorObjects -SecretToken $secret | 
     Select-Object Id, @{N='Name';E={$_.ECMA2HostAttributes.displayName}}, @{N='Login';E={$_.ECMA2HostAttributes.userName}}
 
 # Filter objects by exact attribute value (ECMA2Host only supports exact 'eq' matching)
@@ -279,7 +328,7 @@ Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret `
 
 # RECOMMENDED: Get all objects and filter with PowerShell for partial matches
 $secret = (Get-ECMA2ConnectorSecret -Name "SQLConnector" -IncludeSecretToken).SecretToken
-$users = Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -GetAll
+$users = Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret
 
 # Find users by pattern matching
 $users | Where-Object { $_.UserName -like "*admin*" }
@@ -297,36 +346,119 @@ $users | Where-Object {
 $users | Where-Object { $_.ECMA2HostAttributes.employeeId -gt 10000 }
 
 # Get only the total count of objects (efficient for validation/monitoring)
+# CountOnly mode also returns Last-Successful timestamps for the connector
 $secret = (Get-ECMA2ConnectorSecret -Name "SQLConnector" -IncludeSecretToken).SecretToken
-$count = Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -CountOnly
-Write-Host "Connector has $count objects"
+$result = Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -CountOnly
+Write-Host "Connector has $($result.TotalCount) objects"
+Write-Host "Last Import: $($result.LastSuccessfulImport)"
+Write-Host "Last Export: $($result.LastSuccessfulExport)"
+Write-Host "Last Cache Change: $($result.LastSuccessfulCacheChange)"
 
-# Use CountOnly for quick validation of multiple connectors
+# Use CountOnly for quick validation of multiple connectors with timestamps
 foreach ($connectorName in @('LDAPConnector', 'SQLConnector', 'APIConnector')) {
     $secret = (Get-ECMA2ConnectorSecret -Name $connectorName -IncludeSecretToken).SecretToken
-    $count = Get-ECMA2ConnectorObjects -ConnectorName $connectorName -SecretToken $secret -CountOnly
-    Write-Host "$connectorName has $count objects"
+    $result = Get-ECMA2ConnectorObjects -ConnectorName $connectorName -SecretToken $secret -CountOnly
+    Write-Host "$connectorName`: $($result.TotalCount) objects, Last Import: $($result.LastSuccessfulImport)"
 }
 
-# Get specific page of results (without -GetAll, returns single page)
+# Limit results for testing or working with large connectors
+$secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
+Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret -Limit 50
+
+# Get only first 10 objects for quick testing
+$secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
+Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret -Limit 10
+
+# Get specific page of results with StartIndex
 $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
 Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret `
-    -ItemsPerPage 10 -StartIndex 11
+    -ItemsPerPage 10 -StartIndex 11 -Limit 10
 
 # Show detailed request/response for diagnostics
 $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
 Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret `
-    -GetAll -ShowDetails -ItemsPerPage 5
+    -ShowDetails -ItemsPerPage 5 -Limit 5
 
 # Access ECMA2Host-specific attributes from connector objects
 $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
 $objects = Get-ECMA2Connector -Name "LDAPConnector" | 
-    Get-ECMA2ConnectorObjects -SecretToken $secret -GetAll
+    Get-ECMA2ConnectorObjects -SecretToken $secret
 $objects[0].ECMA2HostAttributes  # View all connector-specific attributes
 $objects[0].RawObject  # View complete SCIM response object
 
 # Note: Port defaults to 8585. For non-default ports, use -Port parameter:
-# Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret -Port 9090 -GetAll
+# Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret -Port 9090
+```
+
+### Send Requests to Connectors (Create/Update/Delete)
+
+```powershell
+# Create a new user in a connector
+$body = @{
+    schemas = @(
+        "urn:ietf:params:scim:schemas:core:2.0:User",
+        "urn:ietf:params:scim:schemas:extension:enterprise:2.0:User"
+    )
+    active = $true
+    meta = @{
+        resourceType = "User"
+    }
+    "urn:ietf:params:scim:schemas:extension:ECMA2Host:2.0:User" = @{
+        id = "12345"
+        displayName = "John Smith"
+        emailPrimary = "john.smith@example.com"
+        externalId = "EXT12345"
+        userName = "jsmith"
+        userType = "Employee"
+    }
+}
+
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "APIConnector" -SecretToken $secret -Body $body -ShowDetails
+
+# Update an existing user (PUT - full replacement)
+$updateBody = @{
+    schemas = @("urn:ietf:params:scim:schemas:core:2.0:User")
+    active = $false
+    "urn:ietf:params:scim:schemas:extension:ECMA2Host:2.0:User" = @{
+        displayName = "John Smith (Inactive)"
+    }
+}
+
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "APIConnector" -SecretToken $secret `
+    -Method PUT -ObjectId "12345" -Body $updateBody
+
+# Partial update (PATCH)
+$patchBody = @{
+    schemas = @("urn:ietf:params:scim:api:messages:2.0:PatchOp")
+    Operations = @(
+        @{
+            op = "replace"
+            path = "active"
+            value = $false
+        }
+    )
+}
+
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "APIConnector" -SecretToken $secret `
+    -Method PATCH -ObjectId "12345" -Body $patchBody
+
+# Delete a user
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "APIConnector" -SecretToken $secret `
+    -Method DELETE -ObjectId "12345"
+
+# Pipeline from Get-ECMA2Connector
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Get-ECMA2Connector -Name "APIConnector" |
+    Invoke-ECMA2ConnectorRequest -SecretToken $secret -Method DELETE -ObjectId "12345"
+
+# Preview changes without applying them (WhatIf)
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "APIConnector" -SecretToken $secret `
+    -Method DELETE -ObjectId "12345" -WhatIf
 ```
 
 ### Generate Connector Documentation
@@ -381,9 +513,10 @@ $backup | Format-List
 - ✅ `Get-ECMA2Connector` - Fully implemented, reads from Configuration.xml
 - ✅ `Set-ECMA2Connector` - Fully implemented, updates Configuration.xml with backup support
 - ✅ `Get-ECMA2ConnectorSecret` - Fully implemented, decrypts passwords and tokens (PS7+ and PS5.1 compatible)
-- ✅ `Get-ECMA2ConnectorObjects` - Fully implemented, queries connector cache using SCIM protocol
+- ✅ `Get-ECMA2ConnectorObjects` - Fully implemented, queries connector cache using SCIM protocol with timestamp tracking
 - ✅ `Get-ECMA2ConnectorStatus` - Fully implemented, shows connector operational status
 - ✅ `Get-ECMA2ConnectorRunHistory` - Fully implemented, retrieves run history from ECMA2Host event log
+- ✅ `Invoke-ECMA2ConnectorRequest` - Fully implemented, sends SCIM create/update/delete requests to connectors
 - ✅ `Export-ECMA2ConnectorConfiguration` - Fully implemented, exports connector config to JSON
 - ✅ `Import-ECMA2ConnectorConfiguration` - Fully implemented, imports connector from JSON and merges into Configuration.xml
 - ✅ `Backup-ECMA2HostConfiguration` - Fully implemented, backs up complete Configuration.xml

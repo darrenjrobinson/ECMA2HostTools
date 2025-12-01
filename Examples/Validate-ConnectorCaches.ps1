@@ -86,6 +86,9 @@ foreach ($connector in $connectors) {
                 ConnectorName = $connector.Name
                 ResourceCount = 0
                 Status = "No Secret Token"
+                LastSuccessfulImport = $null
+                LastSuccessfulExport = $null
+                LastSuccessfulCacheChange = $null
                 LastPageResources = @{}
                 Error = "Could not retrieve secret token"
             }
@@ -100,7 +103,6 @@ foreach ($connector in $connectors) {
             $queryParams = @{
                 ConnectorName = $connector.Name
                 SecretToken = $secretInfo.SecretToken
-                GetAll = $true
                 ErrorAction = 'Stop'
             }
             
@@ -110,6 +112,9 @@ foreach ($connector in $connectors) {
             
             $objects = @(Get-ECMA2ConnectorObjects @queryParams)
             $objectCount = $objects.Count
+            $lastImport = $null
+            $lastExport = $null
+            $lastCacheChange = $null
         } else {
             # Use CountOnly for efficient single-request count
             $queryParams = @{
@@ -123,7 +128,11 @@ foreach ($connector in $connectors) {
                 $queryParams['SkipCertificateCheck'] = $true
             }
             
-            $objectCount = Get-ECMA2ConnectorObjects @queryParams
+            $countResult = Get-ECMA2ConnectorObjects @queryParams
+            $objectCount = $countResult.TotalCount
+            $lastImport = $countResult.LastSuccessfulImport
+            $lastExport = $countResult.LastSuccessfulExport
+            $lastCacheChange = $countResult.LastSuccessfulCacheChange
             $objects = @()  # No objects retrieved in CountOnly mode
         }
         
@@ -155,6 +164,9 @@ foreach ($connector in $connectors) {
             ConnectorName = $connector.Name
             ResourceCount = $objectCount
             Status = "Success"
+            LastSuccessfulImport = $lastImport
+            LastSuccessfulExport = $lastExport
+            LastSuccessfulCacheChange = $lastCacheChange
             LastPageResources = $lastPageHash
             Error = $null
         }
@@ -166,6 +178,9 @@ foreach ($connector in $connectors) {
             ConnectorName = $connector.Name
             ResourceCount = 0
             Status = "Error"
+            LastSuccessfulImport = $null
+            LastSuccessfulExport = $null
+            LastSuccessfulCacheChange = $null
             LastPageResources = @{}
             Error = $_.Exception.Message
         }
@@ -179,7 +194,7 @@ Write-Host "`n========================================" -ForegroundColor Cyan
 Write-Host "CONNECTOR CACHE VALIDATION SUMMARY" -ForegroundColor Cyan
 Write-Host "========================================`n" -ForegroundColor Cyan
 
-$results | Format-Table -Property ConnectorName, ResourceCount, Status -AutoSize
+$results | Format-Table -Property ConnectorName, ResourceCount, Status, LastSuccessfulImport, LastSuccessfulExport, LastSuccessfulCacheChange -AutoSize
 
 # Output detailed results with last page resources
 Write-Host "`nDetailed Results:" -ForegroundColor Cyan
@@ -189,6 +204,16 @@ foreach ($result in $results) {
     Write-Host "Connector: $($result.ConnectorName)" -ForegroundColor Yellow
     Write-Host "  Resource Count: $($result.ResourceCount)" -ForegroundColor Gray
     Write-Host "  Status: $($result.Status)" -ForegroundColor Gray
+    
+    if ($result.LastSuccessfulImport) {
+        Write-Host "  Last Successful Import: $($result.LastSuccessfulImport)" -ForegroundColor Gray
+    }
+    if ($result.LastSuccessfulExport) {
+        Write-Host "  Last Successful Export: $($result.LastSuccessfulExport)" -ForegroundColor Gray
+    }
+    if ($result.LastSuccessfulCacheChange) {
+        Write-Host "  Last Successful Cache Change: $($result.LastSuccessfulCacheChange)" -ForegroundColor Gray
+    }
     
     if ($result.LastPageResources.Count -gt 0) {
         Write-Host "  Last Page Resources ($($result.LastPageResources.Count) items):" -ForegroundColor Gray

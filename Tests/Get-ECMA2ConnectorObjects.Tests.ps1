@@ -46,10 +46,10 @@ Describe 'Get-ECMA2ConnectorObjects' {
             $command.Parameters['CustomFilter'] | Should Not BeNullOrEmpty
         }
 
-        It 'Should have GetAll switch parameter' {
+        It 'Should have Limit parameter' {
             $command = Get-Command Get-ECMA2ConnectorObjects
-            $command.Parameters['GetAll'] | Should Not BeNullOrEmpty
-            $command.Parameters['GetAll'].ParameterType.Name | Should Be 'SwitchParameter'
+            $command.Parameters['Limit'] | Should Not BeNullOrEmpty
+            $command.Parameters['Limit'].ParameterType.Name | Should Match 'Int(32|64)'
         }
 
         It 'Should have ItemsPerPage parameter' {
@@ -97,9 +97,9 @@ Describe 'Get-ECMA2ConnectorObjects' {
             $command.ParameterSets.Name -contains 'CustomFilter' | Should Be $true
         }
 
-        It 'Should have GetAll as default parameter set' {
+        It 'Should have Default as default parameter set' {
             $command = Get-Command Get-ECMA2ConnectorObjects
-            ($command.ParameterSets | Where-Object { $_.IsDefault }).Name | Should Be 'GetAll'
+            ($command.ParameterSets | Where-Object { $_.IsDefault }).Name | Should Be 'Default'
         }
     }
 
@@ -280,8 +280,8 @@ Describe 'Get-ECMA2ConnectorObjects' {
         }
     }
 
-    Context 'GetAll Pagination' {
-        It 'Should make multiple requests when GetAll is specified and there are multiple pages' {
+    Context 'Default Pagination' {
+        It 'Should make multiple requests when retrieving all pages by default' {
             Mock Invoke-WebRequest {
                 if ($Uri -match 'startIndex=11') {
                     # Second page - check this FIRST to avoid matching startIndex=1 in startIndex=11
@@ -300,7 +300,7 @@ Describe 'Get-ECMA2ConnectorObjects' {
                 }
             } -ModuleName ECMA2HostTools -Verifiable
             
-            $result = @(Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -GetAll -ItemsPerPage 10)
+            $result = @(Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -ItemsPerPage 10)
             $result.Count | Should Be 15
             # Verify pagination by checking we got objects from both pages
             $result[0].Id | Should Be 'obj1'
@@ -325,7 +325,7 @@ Describe 'Get-ECMA2ConnectorObjects' {
                 }
             } -ModuleName ECMA2HostTools -Verifiable
             
-            $result = @(Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -GetAll -ItemsPerPage 10)
+            $result = @(Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -ItemsPerPage 10)
             $result.Count | Should Be 12
             $result[0].Id | Should Be 'page1obj1'
             $result[11].Id | Should Be 'page2obj2'
@@ -349,16 +349,41 @@ Describe 'Get-ECMA2ConnectorObjects' {
                 }
             } -ModuleName ECMA2HostTools
             
-            $result = @(Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -GetAll -ItemsPerPage 10)
+            $result = @(Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -ItemsPerPage 10)
             # Verify we got all 15 objects from both pages
             $result.Count | Should Be 15
             $result[0].Id | Should Be 'obj1'
             $result[14].Id | Should Be 'obj15'
         }
+
+        It 'Should respect Limit parameter and stop after reaching limit' {
+            Mock Invoke-WebRequest {
+                $json = '{"schemas": [],"totalResults": 100,"startIndex": 1,"itemsPerPage": 10,"Resources": [{"id": "obj1"}, {"id": "obj2"}, {"id": "obj3"}, {"id": "obj4"}, {"id": "obj5"},{"id": "obj6"}, {"id": "obj7"}, {"id": "obj8"}, {"id": "obj9"}, {"id": "obj10"}]}'
+                return [PSCustomObject]@{ StatusCode = 200; Content = $json; Headers = @{} }
+            } -ModuleName ECMA2HostTools
+            
+            $result = @(Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -Limit 5 -ItemsPerPage 10)
+            $result.Count | Should Be 5
+            $result[0].Id | Should Be 'obj1'
+            $result[4].Id | Should Be 'obj5'
+        }
+
+        It 'Should make only one request when Limit is specified' {
+            Mock Invoke-WebRequest {
+                $json = '{"schemas": [],"totalResults": 1000,"startIndex": 1,"itemsPerPage": 50,"Resources": []}'
+                for ($i = 1; $i -le 50; $i++) {
+                    $json = $json -replace ']$', ",{\"id\": \"obj$i\"}]"
+                }
+                return [PSCustomObject]@{ StatusCode = 200; Content = $json; Headers = @{} }
+            } -ModuleName ECMA2HostTools
+            
+            Get-ECMA2ConnectorObjects -ConnectorName "TestConn" -SecretToken "token" -Limit 25 -ItemsPerPage 50 | Out-Null
+            Assert-MockCalled Invoke-WebRequest -Times 1 -ModuleName ECMA2HostTools
+        }
     }
 
     Context 'Single Page Retrieval' {
-        It 'Should retrieve only single page when GetAll is not specified' -Pending {
+        It 'Should retrieve only single page when Limit equals page size' -Pending {
             # Pending: Pester 3.x mock scoping limitation - test-level mocks don't override Context BeforeEach mocks reliably
             # Functionality verified to work correctly in actual module usage
             $testJson = '{"schemas": ["urn:ietf:params:scim:api:messages:2.0:ListResponse"],"totalResults": 100,"startIndex": 21,"itemsPerPage": 10,"Resources": [{"id": "obj21"}, {"id": "obj22"}, {"id": "obj23"}, {"id": "obj24"}, {"id": "obj25"},{"id": "obj26"}, {"id": "obj27"}, {"id": "obj28"}, {"id": "obj29"}, {"id": "obj30"}]}'

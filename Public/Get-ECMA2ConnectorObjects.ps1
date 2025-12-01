@@ -37,8 +37,9 @@ function Get-ECMA2ConnectorObjects {
     .PARAMETER CustomFilter
         A custom SCIM filter expression (e.g., 'userName eq "user@example.com"').
 
-    .PARAMETER GetAll
-        Retrieve all objects without filtering.
+    .PARAMETER Limit
+        Maximum number of objects to retrieve. If not specified, all objects are retrieved.
+        Use this to test queries or work with large connectors without fetching everything.
 
     .PARAMETER ItemsPerPage
         Number of items per page (default 75).
@@ -66,7 +67,7 @@ function Get-ECMA2ConnectorObjects {
         # Get all objects from a connector (retrieves all pages automatically)
         $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
         Get-ECMA2Connector -Name "LDAPConnector" | 
-            Get-ECMA2ConnectorObjects -SecretToken $secret -GetAll
+            Get-ECMA2ConnectorObjects -SecretToken $secret
 
     .EXAMPLE
         # Filter objects by attribute (exact match only)
@@ -82,19 +83,19 @@ function Get-ECMA2ConnectorObjects {
 
     .EXAMPLE
         # Partial matching requires retrieving objects and using PowerShell filtering
-        # ECMA2Host only supports exact 'eq' matching - use -GetAll with Where-Object for partial matches
+        # ECMA2Host only supports exact 'eq' matching - retrieve all and use Where-Object for partial matches
         $secret = (Get-ECMA2ConnectorSecret -Name "SQLConnector" -IncludeSecretToken).SecretToken
         
         # Get objects where employeeId starts with "100"
-        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -GetAll |
+        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret |
             Where-Object { $_.ECMA2HostAttributes.employeeId -like "100*" }
         
         # Get objects where displayName contains "Smith"
-        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -GetAll |
+        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret |
             Where-Object { $_.DisplayName -like "*Smith*" }
         
         # Multiple criteria with PowerShell filtering
-        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -GetAll |
+        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret |
             Where-Object { $_.Active -eq $true -and $_.UserName -match '^j' }
 
     .EXAMPLE
@@ -104,12 +105,22 @@ function Get-ECMA2ConnectorObjects {
             -CustomFilter 'name eq "John Smith"'
 
     .EXAMPLE
-        # Recommended: Retrieve broader result set and filter with PowerShell
+        # Limit results for testing or initial exploration
+        $secret = (Get-ECMA2ConnectorSecret -Name "SQLConnector" -IncludeSecretToken).SecretToken
+        
+        # Get first 50 objects only
+        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -Limit 50
+        
+        # Get first 10 objects to test query
+        Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -Limit 10
+
+    .EXAMPLE
+        # Recommended: Retrieve all objects and filter with PowerShell
         # More efficient than multiple exact match queries
         $secret = (Get-ECMA2ConnectorSecret -Name "SQLConnector" -IncludeSecretToken).SecretToken
         
         # Get all objects and filter by multiple criteria
-        $users = Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret -GetAll
+        $users = Get-ECMA2ConnectorObjects -ConnectorName "SQLConnector" -SecretToken $secret
         
         # Find users by various patterns
         $users | Where-Object { $_.UserName -like "*admin*" }
@@ -126,14 +137,14 @@ function Get-ECMA2ConnectorObjects {
         # Pipeline connector and access ECMA2Host-specific attributes
         $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
         Get-ECMA2Connector -Name "LDAPConnector" | 
-            Get-ECMA2ConnectorObjects -SecretToken $secret -GetAll | 
+            Get-ECMA2ConnectorObjects -SecretToken $secret | 
             Select-Object Id, @{N='Name';E={$_.ECMA2HostAttributes.displayName}}, @{N='Login';E={$_.ECMA2HostAttributes.userName}}
 
     .EXAMPLE
         # Show detailed request/response information for diagnostics
         $secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
         Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret `
-            -GetAll -ShowDetails -ItemsPerPage 5
+            -ShowDetails -ItemsPerPage 5
 
     .EXAMPLE
         # Get only the total count of objects (efficient for validation)
@@ -142,14 +153,19 @@ function Get-ECMA2ConnectorObjects {
         
         # Returns just the integer count, e.g.: 193689
     #>
-    [CmdletBinding(DefaultParameterSetName = 'GetAll')]
+    [CmdletBinding(DefaultParameterSetName = 'Default')]
     param(
         [Parameter(ParameterSetName = 'Filter', Mandatory)]
         [Parameter(ParameterSetName = 'CustomFilter', Mandatory)]
-        [Parameter(ParameterSetName = 'GetAll', Mandatory)]
+        [Parameter(ParameterSetName = 'Default', Mandatory)]
         [string]$ConnectorName,
 
-        [Parameter(Mandatory)]
+        [Parameter(ParameterSetName = 'Filter', Mandatory)]
+        [Parameter(ParameterSetName = 'CustomFilter', Mandatory)]
+        [Parameter(ParameterSetName = 'Default', Mandatory)]
+        [Parameter(ParameterSetName = 'FilterFromPipeline', Mandatory)]
+        [Parameter(ParameterSetName = 'CustomFilterFromPipeline', Mandatory)]
+        [Parameter(ParameterSetName = 'DefaultFromPipeline', Mandatory)]
         [ValidateNotNull()]
         $SecretToken,
 
@@ -175,13 +191,9 @@ function Get-ECMA2ConnectorObjects {
         [Parameter(ParameterSetName = 'CustomFilterFromPipeline', Mandatory)]
         [string]$CustomFilter,
 
-        [Parameter(ParameterSetName = 'GetAll')]
-        [Parameter(ParameterSetName = 'GetAllFromPipeline')]
-        [Parameter(ParameterSetName = 'Filter')]
-        [Parameter(ParameterSetName = 'FilterFromPipeline')]
-        [Parameter(ParameterSetName = 'CustomFilter')]
-        [Parameter(ParameterSetName = 'CustomFilterFromPipeline')]
-        [switch]$GetAll,
+        [Parameter()]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$Limit,
 
         [Parameter()]
         [int]$ItemsPerPage = 75,
@@ -201,9 +213,9 @@ function Get-ECMA2ConnectorObjects {
         [Parameter()]
         [switch]$ShowDetails,
 
-        [Parameter(ParameterSetName = 'FilterFromPipeline', ValueFromPipeline)]
-        [Parameter(ParameterSetName = 'CustomFilterFromPipeline', ValueFromPipeline)]
-        [Parameter(ParameterSetName = 'GetAllFromPipeline', ValueFromPipeline)]
+        [Parameter(ParameterSetName = 'FilterFromPipeline', ValueFromPipeline, Mandatory)]
+        [Parameter(ParameterSetName = 'CustomFilterFromPipeline', ValueFromPipeline, Mandatory)]
+        [Parameter(ParameterSetName = 'DefaultFromPipeline', ValueFromPipeline, Mandatory)]
         [PSTypeName('ECMA2Host.Connector')]
         [object]$InputObject
     )
@@ -243,6 +255,13 @@ function Get-ECMA2ConnectorObjects {
             }
 
             Write-Verbose "Querying connector: $targetConnectorName"
+            Write-Verbose "Parameter Set: $($PSCmdlet.ParameterSetName)"
+            
+            if ($Limit) {
+                Write-Verbose "Limit: $Limit objects"
+            } else {
+                Write-Verbose "Limit: Not specified (will retrieve all objects)"
+            }
 
             # Build base URI
             $baseuri = "https://$Hostname`:$Port/ecma2host_$targetConnectorName/scim/$ObjectTypePath"
@@ -353,21 +372,62 @@ function Get-ECMA2ConnectorObjects {
             }
             
             $responseObj = $responseContent | ConvertFrom-Json
+            
+            # Capture Last-Successful timestamps from response headers
+            $lastSuccessfulImport = $null
+            $lastSuccessfulExport = $null
+            $lastSuccessfulCacheChange = $null
+            
+            if ($resp.Headers['Last-Successful-Import']) {
+                $importValue = $resp.Headers['Last-Successful-Import']
+                if ($importValue -is [array]) { $importValue = $importValue[0] }
+                if (![string]::IsNullOrWhiteSpace($importValue)) {
+                    $lastSuccessfulImport = [DateTimeOffset]::FromUnixTimeSeconds([long]$importValue).ToLocalTime().DateTime
+                }
+            }
+            if ($resp.Headers['Last-Successful-Export']) {
+                $exportValue = $resp.Headers['Last-Successful-Export']
+                if ($exportValue -is [array]) { $exportValue = $exportValue[0] }
+                if (![string]::IsNullOrWhiteSpace($exportValue)) {
+                    $lastSuccessfulExport = [DateTimeOffset]::FromUnixTimeSeconds([long]$exportValue).ToLocalTime().DateTime
+                }
+            }
+            if ($resp.Headers['Last-Successful-Cache-Change']) {
+                $cacheValue = $resp.Headers['Last-Successful-Cache-Change']
+                if ($cacheValue -is [array]) { $cacheValue = $cacheValue[0] }
+                if (![string]::IsNullOrWhiteSpace($cacheValue)) {
+                    $lastSuccessfulCacheChange = [DateTimeOffset]::FromUnixTimeSeconds([long]$cacheValue).ToLocalTime().DateTime
+                }
+            }
 
             $totalResults = $responseObj.totalResults
             Write-Verbose "Total Results: $totalResults"
             Write-Verbose "Start Index: $($responseObj.startIndex)"
             Write-Verbose "Items Per Page: $($responseObj.itemsPerPage)"
 
-            # If CountOnly is specified, return just the count
+            # If CountOnly is specified, return just the count with timestamps
             if ($CountOnly) {
-                Write-Verbose "CountOnly mode: Returning total count of $totalResults"
-                return $totalResults
+                Write-Verbose "CountOnly mode: Returning total count of $totalResults with timestamps"
+                return [PSCustomObject]@{
+                    TotalCount = $totalResults
+                    LastSuccessfulImport = $lastSuccessfulImport
+                    LastSuccessfulExport = $lastSuccessfulExport
+                    LastSuccessfulCacheChange = $lastSuccessfulCacheChange
+                }
             }
 
+            # Track how many objects we've returned
+            $objectsReturned = 0
+            
             # Return custom objects with metadata
             if ($responseObj.Resources) {
                 foreach ($resource in $responseObj.Resources) {
+                    # Check if we've hit the limit
+                    if ($Limit -and $objectsReturned -ge $Limit) {
+                        Write-Verbose "Reached limit of $Limit objects"
+                        break
+                    }
+                    
                     $obj = [PSCustomObject]@{
                         PSTypeName = 'ECMA2Host.ConnectorObject'
                         ConnectorName = $targetConnectorName
@@ -388,18 +448,19 @@ function Get-ECMA2ConnectorObjects {
                     }
 
                     Write-Output $obj
+                    $objectsReturned++
                 }
             }
 
-            # If GetAll is specified and there are more results, fetch remaining pages
-            if ($GetAll -and $totalResults -gt 0) {
+            # If no Limit specified and there are more results, fetch remaining pages
+            if (-not $Limit -and $totalResults -gt 0) {
                 $currentIndex = $StartIndex + $ItemsPerPage
                 $itemsRetrieved = $responseObj.Resources.Count
                 
-                Write-Verbose "GetAll mode: Retrieved $itemsRetrieved of $totalResults total results in first page"
+                Write-Verbose "Pagination mode: Retrieved $itemsRetrieved of $totalResults total results in first page"
                 
                 while ($itemsRetrieved -lt $totalResults) {
-                    Write-Verbose "Fetching page: starting at index $currentIndex (retrieved $itemsRetrieved of $totalResults)"
+                    Write-Verbose "Fetching next page: starting at index $currentIndex (retrieved $itemsRetrieved of $totalResults)"
                     
                     # Build URI for next page
                     if ($PSBoundParameters.ContainsKey('FilterAttribute')) {
@@ -454,6 +515,7 @@ function Get-ECMA2ConnectorObjects {
                             }
 
                             Write-Output $obj
+                            $objectsReturned++
                         }
                         
                         $itemsRetrieved += $nextResponseObj.Resources.Count
@@ -466,8 +528,10 @@ function Get-ECMA2ConnectorObjects {
                 }
                 
                 Write-Verbose "Pagination complete: Retrieved all $itemsRetrieved objects"
-            } elseif ($GetAll) {
-                Write-Verbose "GetAll specified but no pagination needed (all results in first page or no results)"
+            } elseif ($Limit) {
+                Write-Verbose "Limit specified: Returned $objectsReturned of requested $Limit objects"
+            } else {
+                Write-Verbose "All results retrieved in first page"
             }
 
             # Return summary if no results

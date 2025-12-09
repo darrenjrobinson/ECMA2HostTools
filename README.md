@@ -12,7 +12,7 @@ This module provides a comprehensive set of cmdlets for managing the ECMA2Host s
 - **Connector Operations**: Manage connector lifecycle and status
 - **Run Profile Monitoring**: Monitor connector run history and execution status
 - **Configuration Management**: Export and import connector configurations
-- **Remote Management**: Support for managing ECMA2Host on remote computers
+- **Remote Management**: Query service status on remote computers and access remote configuration files via UNC paths or mapped drives
 
 ## Why Use ECMA2HostTools?
 
@@ -90,10 +90,11 @@ cd ECMA2HostTools
 ### Connector Management
 - `Get-ECMA2Connector` - Gets ECMA2 connector information from Configuration.xml
 - `Set-ECMA2Connector` - Updates ECMA2 connector parameters and settings
+- `Set-ECMA2ConnectorEncryptedParameter` - Sets encrypted parameter values (passwords) on the local ECMA2Host server
 - `Get-ECMA2ConnectorSecret` - Decrypts encrypted parameters and secret tokens from connectors
 - `Get-ECMA2ConnectorObjects` - Retrieves objects from a connector's cache using SCIM queries
 - `Get-ECMA2ConnectorStatus` - Gets the status of an ECMA2 connector
-- `Invoke-ECMA2ConnectorRequest` - Sends SCIM requests (create/update/delete) to an ECMA2 connector
+- `Invoke-ECMA2ConnectorRequest` - Sends SCIM requests (GET/POST/PUT/PATCH/DELETE) to an ECMA2 connector
 
 ### Run Profile Monitoring
 - `Get-ECMA2ConnectorRunHistory` - Gets the run history for a connector
@@ -134,13 +135,24 @@ Stop-ECMA2Host -Force
 # Check service status (no admin privileges required)
 Get-ECMA2HostStatus
 
-# Check status on remote computer
+# Check status on remote computer (requires appropriate permissions)
 Get-ECMA2HostStatus -ComputerName "Server01"
+
+# Example output
+ComputerName        : Server01
+ServiceName         : Microsoft ECMA2Host
+DisplayName         : Microsoft ECMA2Host
+Status              : Running
+StartType           : Auto
+CanStop             : True
+CanPauseAndContinue : True
+DependentServices   : 0
+RequiredServices    : 0
 ```
 
 ### Get Connector Information
 ```powershell
-# Get all connectors
+# Get all connectors (local machine)
 Get-ECMA2Connector
 
 # Get specific connector
@@ -154,6 +166,16 @@ $connector = Get-ECMA2Connector -Name "SQLConnector"
 $connector.RunProfiles
 $connector.Parameters
 $connector.AutosyncTimer
+
+# Query connectors on a remote computer
+# Map a network drive to the remote computer's C$ share
+New-PSDrive -Name "E" -PSProvider FileSystem -Root "\\Server01\C$" -Persist
+
+# Access remote configuration file
+Get-ECMA2Connector -ConfigurationPath 'E:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml'
+
+# Or use UNC path directly
+Get-ECMA2Connector -ConfigurationPath '\\Server01\C$\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml'
 ```
 
 ### Update Connector Configuration
@@ -247,9 +269,112 @@ Get-ECMA2ConnectorStatus | Where-Object { $_.HealthStatus -ne 'Healthy' }
 Get-ECMA2ConnectorStatus -Name "SQLConnector" | Format-List
 ```
 
-### Export and Import Connector Configuration
+### Set Encrypted Parameters (Passwords)
+
+> **Important**: This cmdlet MUST be executed locally on the ECMA2Host server or via `Invoke-Command` to that server. DPAPI encryption is machine-specific and encrypted values can only be used on the machine where they were created.
+
 ```powershell
-# Export connector configuration
+# Set encrypted parameter on local ECMA2Host server
+Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "Password" -Value "SecureP@ssw0rd123"
+
+# Set multiple encrypted parameters
+Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "Password" -Value "MainP@ssw0rd"
+Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "Password (auxiliary)" -Value "AuxP@ssw0rd"
+
+# Use with pipeline
+Get-ECMA2Connector -Name "LDAPConnector" | 
+    Set-ECMA2ConnectorEncryptedParameter -ParameterName "Password" -Value "LdapP@ssw0rd"
+
+# Remote execution via PowerShell remoting
+Invoke-Command -ComputerName "EcmaServer" -ScriptBlock {
+    Import-Module ECMA2HostTools
+    Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "Password" -Value "SecureP@ssw0rd123"
+}
+
+# Automated deployment with password from Azure Key Vault
+$password = Get-AzKeyVaultSecret -VaultName "MyVault" -Name "SQL-Password" -AsPlainText
+Invoke-Command -ComputerName "EcmaServer" -ScriptBlock {
+    param($pwd)
+    Import-Module ECMA2HostTools
+    Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "Password" -Value $pwd
+} -ArgumentList $password
+
+# Automated deployment with password from Microsoft.PowerShell.SecretStore
+$password = Get-Secret -Name "SQL-Service-Account" -AsPlainText
+Invoke-Command -ComputerName "EcmaServer" -ScriptBlock {
+    param($pwd, $connectorName)
+    Import-Module ECMA2HostTools
+    Set-ECMA2ConnectorEncryptedParameter -Name $connectorName -ParameterName "Password" -Value $pwd
+    
+    # Restart service to apply changes
+    Restart-Service -Name "Microsoft ECMA2Host" -Force
+} -ArgumentList $password, "SQLConnector"
+
+# Extract password from one ECMA2Host server and set it on another
+# Note: ECMA2HostTools module must be installed on both source and target servers
+# Important: Module must be installed system-wide (AllUsers scope) on remote servers for PowerShell remoting
+# Install-Module -Name ECMA2HostTools -Scope AllUsers
+# Step 1: Extract password from source server
+$password = Invoke-Command -ComputerName "SourceServer" -ScriptBlock {
+    Import-Module ECMA2HostTools
+    $secrets = Get-ECMA2ConnectorSecret -Name "SQLConnector"
+    return $secrets.EncryptedParameters['Password'].Value
+}
+
+# Step 2: Set password on target server
+Invoke-Command -ComputerName "TargetServer" -ScriptBlock {
+    param($pwd)
+    Import-Module ECMA2HostTools
+    Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "Password" -Value $pwd
+} -ArgumentList $password
+
+# Extract SecretToken from source and set on target server(s)
+# Important: The unencrypted SecretToken value must be the same on all ECMA2Host servers
+# connecting to the same Entra application. However, each server encrypts it individually
+# using its own machine-specific DPAPI keys, so you must set it on each server separately.
+$secretToken = Invoke-Command -ComputerName "SourceServer" -ScriptBlock {
+    Import-Module ECMA2HostTools
+    $secrets = Get-ECMA2ConnectorSecret -Name "SQLConnector" -IncludeSecretToken
+    return $secrets.SecretToken
+}
+
+# Set the same SecretToken on target server (will be encrypted for that specific machine)
+Invoke-Command -ComputerName "TargetServer" -ScriptBlock {
+    param($token)
+    Import-Module ECMA2HostTools
+    Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "SecretToken" -Value $token
+} -ArgumentList $secretToken
+
+# Set on additional servers if needed (e.g., for high availability)
+# Each server will have a different encrypted value in XML, but all decrypt to the same token
+Invoke-Command -ComputerName "TargetServer2" -ScriptBlock {
+    param($token)
+    Import-Module ECMA2HostTools
+    Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "SecretToken" -Value $token
+} -ArgumentList $secretToken
+
+# View operation result
+$result = Set-ECMA2ConnectorEncryptedParameter -Name "SQLConnector" -ParameterName "Password" -Value "P@ssw0rd"
+$result | Format-List
+
+# Example output:
+# ConnectorName     : SQLConnector
+# ParameterName     : Password
+# ConfigurationPath : C:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml
+# BackupPath        : C:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml.backup_20251204_131500
+# Timestamp         : 12/04/2025 1:15:00 PM
+# ComputerName      : ECMA2HOSTSERVER
+# Success           : True
+
+# Note: After setting encrypted parameters, restart the ECMA2Host service:
+# Restart-Service -Name "Microsoft ECMA2Host" -Force
+```
+
+### Export and Import Connector Configuration
+
+#### Export Connector Configuration
+```powershell
+# Export connector configuration to JSON
 Export-ECMA2ConnectorConfiguration -ConnectorName "LDAPConnector" -Path "C:\Backup\LDAPConnector.json"
 
 # Export with decrypted secrets (requires admin on ECMA2Host server)
@@ -261,9 +386,103 @@ Export-ECMA2ConnectorConfiguration -ConnectorName "SQLConnector" -Path "C:\Backu
 # View export summary
 $export = Export-ECMA2ConnectorConfiguration -ConnectorName "LDAPConnector" -Path "C:\Backup\LDAPConnector.json"
 $export | Format-List
+```
 
-# Import connector configuration
-Import-ECMA2ConnectorConfiguration -Path "C:\Backup\LDAPConnector.json" -ConnectorName "LDAPConnector-Restored"
+#### Import Connector Configuration
+
+> **Important Prerequisites**: Before importing a connector configuration to a target ECMA2Host server, ensure:
+> - All required connector libraries (DLLs) are installed in the ECMA folder (e.g., for Granfeldt PowerShell Management Agent: `Granfeldt.PowerShell.ManagementAgent.dll`)
+> - All configuration files, scripts, and dependencies referenced by the connector are present on the target server
+> - The ECMAFolderPath and script paths in the JSON match the target server's directory structure
+> - The ECMA2Host service is stopped before importing to prevent conflicts
+>
+> **CRITICAL - Encrypted Parameters Limitation**: 
+> - Encrypted parameters (passwords, SecretToken) use Windows DPAPI with LocalMachine scope, which is **machine-specific**
+> - When importing to a **different server**, encrypted values from the source server **cannot be decrypted** on the target server
+> - After importing to a remote server, you **must** use the ECMA2Host Configuration Wizard UI to re-enter all encrypted parameters (passwords)
+> - The SecretToken will be automatically regenerated by ECMA2Host when you save the connector in the Configuration Wizard
+> - Alternatively, export **without** `-IncludeSecrets`, import to the target server, then manually configure encrypted parameters in the UI
+
+```powershell
+# Import to local ECMA2Host (default configuration path)
+Import-ECMA2ConnectorConfiguration -Path "C:\Backup\LDAPConnector.json"
+
+# Import with a new connector name
+Import-ECMA2ConnectorConfiguration -Path "C:\Backup\LDAPConnector.json" -ConnectorName "LDAPConnector-Test"
+
+# Overwrite existing connector (use with caution)
+Import-ECMA2ConnectorConfiguration -Path "C:\Backup\LDAPConnector.json" -Force
+
+# Import to remote ECMA2Host using mapped network drive
+# Step 1: Map network drive to remote server's C$ share
+New-PSDrive -Name "E" -PSProvider FileSystem -Root "\\Server01\C$" -Persist
+
+# Step 2: Import connector to remote Configuration.xml
+Import-ECMA2ConnectorConfiguration -Path "C:\Backup\LDAPConnector.json" `
+    -ConfigurationPath 'E:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml' `
+    -ConnectorName "LDAPConnector"
+
+# Or use UNC path directly (no drive mapping required)
+Import-ECMA2ConnectorConfiguration -Path "C:\Backup\LDAPConnector.json" `
+    -ConfigurationPath '\\Server01\C$\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml'
+
+# View import summary
+$import = Import-ECMA2ConnectorConfiguration -Path "C:\Backup\SQLConnector.json"
+$import | Format-List
+
+# Example output:
+# ConnectorName       : SQLConnector
+# SourceFile         : C:\Backup\SQLConnector.json
+# ConfigurationPath  : C:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml
+# BackupPath         : C:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml.backup_20251204_120137
+# Action             : Created
+# Timestamp          : 12/04/2025 12:01:37 PM
+# ParameterCount     : 8
+# IncludedSecrets    : True
+```
+
+**Complete Remote Deployment Example:**
+
+```powershell
+# Example: Deploy a Granfeldt PowerShell MA connector to a remote server
+
+# 1. Copy connector library to remote server
+Copy-Item "C:\ECMA\Granfeldt.PowerShell.ManagementAgent.dll" `
+    -Destination "\\Server01\C$\Program Files\Microsoft ECMA2Host\Service\ECMA\Granfeldt.PowerShell.ManagementAgent.dll"
+
+# 2. Copy connector scripts and configuration files
+$remoteScriptPath = "\\Server01\C$\Program Files\Microsoft ECMA2Host\Service\ECMA\PSMAExtensions\MyConnector"
+New-Item -Path $remoteScriptPath -ItemType Directory -Force
+Copy-Item "C:\Scripts\MyConnector\*" -Destination $remoteScriptPath -Recurse -Force
+
+# 3. Map network drive for configuration access
+New-PSDrive -Name "E" -PSProvider FileSystem -Root "\\Server01\C$" -Persist
+
+# 4. Import connector configuration to remote server
+Import-ECMA2ConnectorConfiguration -Path "C:\Backup\MyConnector.json" `
+    -ConfigurationPath 'E:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml' `
+    -ConnectorName "MyConnector"
+
+# 5. Verify connector was added successfully
+Get-ECMA2Connector -ConfigurationPath 'E:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml' `
+    -Name "MyConnector"
+
+# 6. Configure encrypted parameters (passwords) on the remote server
+#    Option A: Use the ECMA2Host Configuration Wizard UI
+#    Option B: Use PowerShell remoting to set them programmatically
+
+# Option B: Set encrypted parameters programmatically via PowerShell remoting
+$password = "SecureP@ssw0rd123"  # Or retrieve from secure vault
+Invoke-Command -ComputerName "Server01" -ScriptBlock {
+    param($pwd, $connectorName)
+    Import-Module ECMA2HostTools
+    Set-ECMA2ConnectorEncryptedParameter -Name $connectorName -ParameterName "Password" -Value $pwd
+} -ArgumentList $password, "MyConnector"
+
+# 7. Restart remote ECMA2Host service to apply changes
+Stop-ECMA2Host -ComputerName "Server01"
+Start-Sleep -Seconds 3
+Start-ECMA2Host -ComputerName "Server01"
 ```
 
 ### Get Run History
@@ -390,10 +609,26 @@ $objects[0].RawObject  # View complete SCIM response object
 # Get-ECMA2ConnectorObjects -ConnectorName "LDAPConnector" -SecretToken $secret -Port 9090
 ```
 
-### Send Requests to Connectors (Create/Update/Delete)
+### Send SCIM Requests to Connectors (GET/POST/PUT/PATCH/DELETE)
 
 ```powershell
-# Create a new user in a connector
+# Query a specific object by ID (GET)
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "APIConnector" -SecretToken $secret `
+    -Method GET -ObjectId "12345"
+
+# Query objects with a filter (replicate Entra SCIM queries)
+$secret = (Get-ECMA2ConnectorSecret -Name "LDAPConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "LDAPConnector" -SecretToken $secret `
+    -Method GET -FilterAttribute "urn:ietf:params:scim:schemas:extension:ECMA2Host:2.0:User:employeeId" `
+    -FilterValue "12345" -ShowDetails
+
+# Query with custom SCIM filter
+$secret = (Get-ECMA2ConnectorSecret -Name "APIConnector" -IncludeSecretToken).SecretToken
+Invoke-ECMA2ConnectorRequest -ConnectorName "APIConnector" -SecretToken $secret `
+    -Method GET -CustomFilter 'userName eq "jsmith"'
+
+# Create a new user in a connector (POST)
 $body = @{
     schemas = @(
         "urn:ietf:params:scim:schemas:core:2.0:User",
@@ -489,13 +724,22 @@ $doc | Format-List
 Backup-ECMA2HostConfiguration -Path "C:\Backups\ECMA2Host_$(Get-Date -Format 'yyyyMMdd').xml"
 
 # Restore complete configuration
-Restore-ECMA2HostConfiguration -Path "C:\Backups\ECMA2Host_20250117.xml"
+## Requirements
 
-# Restore and restart service automatically
-Restore-ECMA2HostConfiguration -Path "C:\Backups\ECMA2Host_20250117.xml" -RestartService -Force
+- PowerShell 5.1 or later (PowerShell 7+ supported with automatic fallback for decryption)
+- ECMA2Host installed on the target system
+- **Administrator privileges required** for service management operations (Start/Stop/Resume)
+- Appropriate permissions to manage services and connectors
+- **Secret decryption must run on the same machine** where ECMA2Host is installed (uses DPAPI LocalMachine scope)
 
-# View backup summary
-$backup = Backup-ECMA2HostConfiguration -Path "C:\Backups\Full.xml"
+### Remote Management Requirements
+
+- **Service Status Queries**: Remote service queries require appropriate WMI/CIM permissions on the target computer
+- **Configuration File Access**: Reading remote configuration files requires:
+  - Network access to the remote computer's admin shares (e.g., `\\Server01\C$`)
+  - File system permissions to read the Configuration.xml file
+  - Either map a network drive or use UNC paths with the `-ConfigurationPath` parameter
+- **Secret Decryption**: Must be performed locally on the ECMA2Host server (cannot decrypt secrets from remote configuration files)
 $backup | Format-List
 ```
 
@@ -512,11 +756,12 @@ $backup | Format-List
 **Implemented Functions:**
 - ✅ `Get-ECMA2Connector` - Fully implemented, reads from Configuration.xml
 - ✅ `Set-ECMA2Connector` - Fully implemented, updates Configuration.xml with backup support
+- ✅ `Set-ECMA2ConnectorEncryptedParameter` - Fully implemented, sets encrypted parameters with DPAPI encryption
 - ✅ `Get-ECMA2ConnectorSecret` - Fully implemented, decrypts passwords and tokens (PS7+ and PS5.1 compatible)
 - ✅ `Get-ECMA2ConnectorObjects` - Fully implemented, queries connector cache using SCIM protocol with timestamp tracking
 - ✅ `Get-ECMA2ConnectorStatus` - Fully implemented, shows connector operational status
 - ✅ `Get-ECMA2ConnectorRunHistory` - Fully implemented, retrieves run history from ECMA2Host event log
-- ✅ `Invoke-ECMA2ConnectorRequest` - Fully implemented, sends SCIM create/update/delete requests to connectors
+- ✅ `Invoke-ECMA2ConnectorRequest` - Fully implemented, sends SCIM requests (GET/POST/PUT/PATCH/DELETE) to connectors
 - ✅ `Export-ECMA2ConnectorConfiguration` - Fully implemented, exports connector config to JSON
 - ✅ `Import-ECMA2ConnectorConfiguration` - Fully implemented, imports connector from JSON and merges into Configuration.xml
 - ✅ `Backup-ECMA2HostConfiguration` - Fully implemented, backs up complete Configuration.xml

@@ -31,10 +31,23 @@ function Import-ECMA2ConnectorConfiguration {
         Import-ECMA2ConnectorConfiguration -Path "C:\Backup\ADConnector.json" -ConnectorName "ADConnector_New" -Force
         Imports and creates a connector with a new name, overwriting if exists.
 
+    .EXAMPLE
+        # Import to remote server using mapped drive
+        New-PSDrive -Name "E" -PSProvider FileSystem -Root "\\Server01\C$" -Persist
+        Import-ECMA2ConnectorConfiguration -Path "C:\Backup\ADConnector.json" `
+            -ConfigurationPath 'E:\Program Files\Microsoft ECMA2Host\Service\Configuration\Configuration.xml'
+
     .NOTES
         This cmdlet imports from JSON format created by Export-ECMA2ConnectorConfiguration.
         It does NOT import full XML Configuration.xml files directly.
         Use Restore-ECMA2HostConfiguration for full configuration restore.
+
+        IMPORTANT - Encrypted Parameters:
+        Encrypted parameters (passwords, SecretToken) use Windows DPAPI with LocalMachine scope.
+        When importing to a DIFFERENT server, encrypted values cannot be decrypted because
+        DPAPI encryption is machine-specific. After importing to a remote server, you MUST
+        use the ECMA2Host Configuration Wizard to re-enter all encrypted parameters (passwords).
+        The SecretToken will be automatically regenerated when you save in the Configuration Wizard.
     #>
     [CmdletBinding(SupportsShouldProcess)]
     param(
@@ -86,11 +99,27 @@ function Import-ECMA2ConnectorConfiguration {
             
             # Load the XML configuration
             Write-Verbose "Loading Configuration.xml from: $ConfigurationPath"
-            [xml]$config = Get-Content -Path $ConfigurationPath -ErrorAction Stop
+            $config = New-Object System.Xml.XmlDocument
+            try {
+                $config.Load($ConfigurationPath)
+            }
+            catch {
+                throw "Failed to load XML configuration from '$ConfigurationPath': $_"
+            }
             
-            # Check if connector already exists
-            $existingConnector = $config.Configuration.Connectors.Connector | 
-                Where-Object { $_.ECMAConfig.ProfileName -eq $targetName }
+            # Validate configuration structure
+            if (-not $config.Configuration) {
+                throw "Invalid configuration file format. Missing 'Configuration' root element."
+            }
+            if (-not $config.Configuration.Connectors) {
+                # Create Connectors element if it doesn't exist
+                $connectorsElement = $config.CreateElement('Connectors')
+                $config.Configuration.AppendChild($connectorsElement) | Out-Null
+            }
+            
+            # Check if connector already exists using XPath
+            $connectorsNode = $config.SelectSingleNode('/Configuration/Connectors')
+            $existingConnector = $connectorsNode.SelectSingleNode("Connector[ECMAConfig/ProfileName='$targetName']")
             
             if ($existingConnector -and -not $Force) {
                 throw "Connector '$targetName' already exists. Use -Force to overwrite."
@@ -106,7 +135,7 @@ function Import-ECMA2ConnectorConfiguration {
                 # Remove existing connector if Force is specified
                 if ($existingConnector) {
                     Write-Verbose "Removing existing connector '$targetName'"
-                    $config.Configuration.Connectors.RemoveChild($existingConnector) | Out-Null
+                    $connectorsNode.RemoveChild($existingConnector) | Out-Null
                 }
                 
                 # Create new Connector element
@@ -114,20 +143,42 @@ function Import-ECMA2ConnectorConfiguration {
                 
                 # Create ECMAConfig section
                 $ecmaConfig = $config.CreateElement('ECMAConfig')
-                $ecmaConfig.AppendChild($config.CreateElement('ECMAFolderPath')).InnerText = $exportData.Connector.ECMAFolderPath
-                $ecmaConfig.AppendChild($config.CreateElement('LibraryName')).InnerText = $exportData.Connector.LibraryName
-                $ecmaConfig.AppendChild($config.CreateElement('AutosyncTimer')).InnerText = $exportData.Connector.AutosyncTimer
-                $ecmaConfig.AppendChild($config.CreateElement('ProfileName')).InnerText = $targetName
-                $ecmaConfig.AppendChild($config.CreateElement('ProfileDescription')).InnerText = $exportData.Connector.Description
-                $ecmaConfig.AppendChild($config.CreateElement('CreationDateTime')).InnerText = (Get-Date).ToString('dddd, MMMM d, yyyy h:mm:ss tt')
-                $ecmaConfig.AppendChild($config.CreateElement('ModificationDateTime')).InnerText = (Get-Date).ToString('dddd, MMMM d, yyyy h:mm:ss tt')
-                $ecmaConfig.AppendChild($config.CreateElement('Validated')).InnerText = $exportData.Connector.Validated.ToString().ToLower()
                 
-                # Add SecretToken if present
-                if ($exportData.Secrets -and $exportData.Secrets.SecretToken) {
-                    Write-Verbose "Including SecretToken from export"
-                    $ecmaConfig.AppendChild($config.CreateElement('SecretToken')).InnerText = $exportData.Secrets.SecretToken
-                }
+                $elem = $config.CreateElement('ECMAFolderPath')
+                $elem.InnerText = $exportData.Connector.ECMAFolderPath
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('LibraryName')
+                $elem.InnerText = $exportData.Connector.LibraryName
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('AutosyncTimer')
+                $elem.InnerText = $exportData.Connector.AutosyncTimer
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('ProfileName')
+                $elem.InnerText = $targetName
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('ProfileDescription')
+                $elem.InnerText = $exportData.Connector.Description
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('CreationDateTime')
+                $elem.InnerText = (Get-Date).ToString('dddd, MMMM d, yyyy h:mm:ss tt')
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('ModificationDateTime')
+                $elem.InnerText = (Get-Date).ToString('dddd, MMMM d, yyyy h:mm:ss tt')
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('Validated')
+                $elem.InnerText = $exportData.Connector.Validated.ToString().ToLower()
+                $ecmaConfig.AppendChild($elem) | Out-Null
+                
+                # Note: SecretToken is NOT imported as it's machine-specific (DPAPI LocalMachine scope)
+                # It will be automatically generated when the connector is saved in the Configuration Wizard
+                Write-Verbose "Skipping SecretToken (must be regenerated on target server)"
                 
                 $newConnector.AppendChild($ecmaConfig) | Out-Null
                 
@@ -136,18 +187,50 @@ function Import-ECMA2ConnectorConfiguration {
                 
                 # Add Parameters
                 if ($exportData.Connector.Parameters) {
+                    Write-Verbose "Adding connector parameters"
                     $parameters = $config.CreateElement('Parameters')
                     
                     foreach ($paramName in ($exportData.Connector.Parameters.PSObject.Properties.Name)) {
+                        Write-Verbose "Processing parameter: $paramName"
                         $paramData = $exportData.Connector.Parameters.$paramName
                         
+                        if (-not $paramData) {
+                            Write-Warning "Parameter '$paramName' has no data, skipping"
+                            continue
+                        }
+                        
+                        # Skip encrypted parameters - they must be re-entered in the Configuration Wizard
+                        # DPAPI encryption is machine-specific and cannot be transferred between servers
+                        if ($paramData.Encrypted -eq $true) {
+                            Write-Verbose "Skipping encrypted parameter '$paramName' (must be configured on target server)"
+                            continue
+                        }
+                        
                         $parameter = $config.CreateElement('Parameter')
-                        $parameter.AppendChild($config.CreateElement('Name')).InnerText = $paramData.Name
-                        $parameter.AppendChild($config.CreateElement('Type')).InnerText = $paramData.Type
-                        $parameter.AppendChild($config.CreateElement('Use')).InnerText = $paramData.Use
-                        $parameter.AppendChild($config.CreateElement('SchemaNumber')).InnerText = '1'
-                        $parameter.AppendChild($config.CreateElement('Encrypted')).InnerText = $paramData.Encrypted.ToString().ToLower()
-                        $parameter.AppendChild($config.CreateElement('Value')).InnerText = $paramData.Value
+                        
+                        $elem = $config.CreateElement('Name')
+                        $elem.InnerText = $paramData.Name
+                        $parameter.AppendChild($elem) | Out-Null
+                        
+                        $elem = $config.CreateElement('Type')
+                        $elem.InnerText = $paramData.Type
+                        $parameter.AppendChild($elem) | Out-Null
+                        
+                        $elem = $config.CreateElement('Use')
+                        $elem.InnerText = $paramData.Use
+                        $parameter.AppendChild($elem) | Out-Null
+                        
+                        $elem = $config.CreateElement('SchemaNumber')
+                        $elem.InnerText = '1'
+                        $parameter.AppendChild($elem) | Out-Null
+                        
+                        $elem = $config.CreateElement('Encrypted')
+                        $elem.InnerText = 'false'
+                        $parameter.AppendChild($elem) | Out-Null
+                        
+                        $elem = $config.CreateElement('Value')
+                        $elem.InnerText = $paramData.Value
+                        $parameter.AppendChild($elem) | Out-Null
                         
                         $parameters.AppendChild($parameter) | Out-Null
                     }
@@ -156,10 +239,21 @@ function Import-ECMA2ConnectorConfiguration {
                 }
                 
                 # Add basic connector capabilities
-                $connectorConfig.AppendChild($config.CreateElement('IsExportSupported')).InnerText = $exportData.Connector.IsExportSupported.ToString().ToLower()
-                $connectorConfig.AppendChild($config.CreateElement('IsFullImportSupported')).InnerText = $exportData.Connector.IsFullImportSupported.ToString().ToLower()
-                $connectorConfig.AppendChild($config.CreateElement('IsDeltaImportSupported')).InnerText = $exportData.Connector.IsDeltaImportSupported.ToString().ToLower()
-                $connectorConfig.AppendChild($config.CreateElement('IsExportOnly')).InnerText = $exportData.Connector.IsExportOnly.ToString().ToLower()
+                $elem = $config.CreateElement('IsExportSupported')
+                $elem.InnerText = $exportData.Connector.IsExportSupported.ToString().ToLower()
+                $connectorConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('IsFullImportSupported')
+                $elem.InnerText = $exportData.Connector.IsFullImportSupported.ToString().ToLower()
+                $connectorConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('IsDeltaImportSupported')
+                $elem.InnerText = $exportData.Connector.IsDeltaImportSupported.ToString().ToLower()
+                $connectorConfig.AppendChild($elem) | Out-Null
+                
+                $elem = $config.CreateElement('IsExportOnly')
+                $elem.InnerText = $exportData.Connector.IsExportOnly.ToString().ToLower()
+                $connectorConfig.AppendChild($elem) | Out-Null
                 
                 $newConnector.AppendChild($connectorConfig) | Out-Null
                 
@@ -171,7 +265,11 @@ function Import-ECMA2ConnectorConfiguration {
                 
                 # Add the connector to the configuration
                 Write-Verbose "Adding connector to Configuration.xml"
-                $config.Configuration.Connectors.AppendChild($newConnector) | Out-Null
+                $connectorsNode = $config.SelectSingleNode('/Configuration/Connectors')
+                if (-not $connectorsNode) {
+                    throw "Failed to locate Connectors node in configuration XML"
+                }
+                $connectorsNode.AppendChild($newConnector) | Out-Null
                 
                 # Save the configuration
                 Write-Verbose "Saving configuration to: $ConfigurationPath"
@@ -202,3 +300,222 @@ function Import-ECMA2ConnectorConfiguration {
         Write-Verbose "Import-ECMA2ConnectorConfiguration operation completed"
     }
 }
+
+# SIG # Begin signature block
+# MIIoYgYJKoZIhvcNAQcCoIIoUzCCKE8CAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA5oUjJ4ACpP4/T
+# +ZH7btmiVi59i3NeHwQmqFYs9VUhr6CCIV8wggWNMIIEdaADAgECAhAOmxiO+dAt
+# 5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUAMGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
+# EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xJDAiBgNV
+# BAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQgUm9vdCBDQTAeFw0yMjA4MDEwMDAwMDBa
+# Fw0zMTExMDkyMzU5NTlaMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2Vy
+# dCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lD
+# ZXJ0IFRydXN0ZWQgUm9vdCBHNDCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoC
+# ggIBAL/mkHNo3rvkXUo8MCIwaTPswqclLskhPfKK2FnC4SmnPVirdprNrnsbhA3E
+# MB/zG6Q4FutWxpdtHauyefLKEdLkX9YFPFIPUh/GnhWlfr6fqVcWWVVyr2iTcMKy
+# unWZanMylNEQRBAu34LzB4TmdDttceItDBvuINXJIB1jKS3O7F5OyJP4IWGbNOsF
+# xl7sWxq868nPzaw0QF+xembud8hIqGZXV59UWI4MK7dPpzDZVu7Ke13jrclPXuU1
+# 5zHL2pNe3I6PgNq2kZhAkHnDeMe2scS1ahg4AxCN2NQ3pC4FfYj1gj4QkXCrVYJB
+# MtfbBHMqbpEBfCFM1LyuGwN1XXhm2ToxRJozQL8I11pJpMLmqaBn3aQnvKFPObUR
+# WBf3JFxGj2T3wWmIdph2PVldQnaHiZdpekjw4KISG2aadMreSx7nDmOu5tTvkpI6
+# nj3cAORFJYm2mkQZK37AlLTSYW3rM9nF30sEAMx9HJXDj/chsrIRt7t/8tWMcCxB
+# YKqxYxhElRp2Yn72gLD76GSmM9GJB+G9t+ZDpBi4pncB4Q+UDCEdslQpJYls5Q5S
+# UUd0viastkF13nqsX40/ybzTQRESW+UQUOsxxcpyFiIJ33xMdT9j7CFfxCBRa2+x
+# q4aLT8LWRV+dIPyhHsXAj6KxfgommfXkaS+YHS312amyHeUbAgMBAAGjggE6MIIB
+# NjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBTs1+OC0nFdZEzfLmc/57qYrhwP
+# TzAfBgNVHSMEGDAWgBRF66Kv9JLLgjEtUYunpyGd823IDzAOBgNVHQ8BAf8EBAMC
+# AYYweQYIKwYBBQUHAQEEbTBrMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdp
+# Y2VydC5jb20wQwYIKwYBBQUHMAKGN2h0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNv
+# bS9EaWdpQ2VydEFzc3VyZWRJRFJvb3RDQS5jcnQwRQYDVR0fBD4wPDA6oDigNoY0
+# aHR0cDovL2NybDMuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENB
+# LmNybDARBgNVHSAECjAIMAYGBFUdIAAwDQYJKoZIhvcNAQEMBQADggEBAHCgv0Nc
+# Vec4X6CjdBs9thbX979XB72arKGHLOyFXqkauyL4hxppVCLtpIh3bb0aFPQTSnov
+# Lbc47/T/gLn4offyct4kvFIDyE7QKt76LVbP+fT3rDB6mouyXtTP0UNEm0Mh65Zy
+# oUi0mcudT6cGAxN3J0TU53/oWajwvy8LpunyNDzs9wPHh6jSTEAZNUZqaVSwuKFW
+# juyk1T3osdz9HNj0d1pcVIxv76FQPfx2CWiEn2/K2yCNNWAcAgPLILCsWKAOQGPF
+# mCLBsln1VWvPJ6tsds5vIy30fnFqI2si/xK4VC0nftg62fC2h5b9W9FcrBjDTZ9z
+# twGpn1eqXijiuZQwggawMIIEmKADAgECAhAIrUCyYNKcTJ9ezam9k67ZMA0GCSqG
+# SIb3DQEBDAUAMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMx
+# GTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0IFRy
+# dXN0ZWQgUm9vdCBHNDAeFw0yMTA0MjkwMDAwMDBaFw0zNjA0MjgyMzU5NTlaMGkx
+# CzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4
+# RGlnaUNlcnQgVHJ1c3RlZCBHNCBDb2RlIFNpZ25pbmcgUlNBNDA5NiBTSEEzODQg
+# MjAyMSBDQTEwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDVtC9C0Cit
+# eLdd1TlZG7GIQvUzjOs9gZdwxbvEhSYwn6SOaNhc9es0JAfhS0/TeEP0F9ce2vnS
+# 1WcaUk8OoVf8iJnBkcyBAz5NcCRks43iCH00fUyAVxJrQ5qZ8sU7H/Lvy0daE6ZM
+# swEgJfMQ04uy+wjwiuCdCcBlp/qYgEk1hz1RGeiQIXhFLqGfLOEYwhrMxe6TSXBC
+# Mo/7xuoc82VokaJNTIIRSFJo3hC9FFdd6BgTZcV/sk+FLEikVoQ11vkunKoAFdE3
+# /hoGlMJ8yOobMubKwvSnowMOdKWvObarYBLj6Na59zHh3K3kGKDYwSNHR7OhD26j
+# q22YBoMbt2pnLdK9RBqSEIGPsDsJ18ebMlrC/2pgVItJwZPt4bRc4G/rJvmM1bL5
+# OBDm6s6R9b7T+2+TYTRcvJNFKIM2KmYoX7BzzosmJQayg9Rc9hUZTO1i4F4z8ujo
+# 7AqnsAMrkbI2eb73rQgedaZlzLvjSFDzd5Ea/ttQokbIYViY9XwCFjyDKK05huzU
+# tw1T0PhH5nUwjewwk3YUpltLXXRhTT8SkXbev1jLchApQfDVxW0mdmgRQRNYmtwm
+# KwH0iU1Z23jPgUo+QEdfyYFQc4UQIyFZYIpkVMHMIRroOBl8ZhzNeDhFMJlP/2NP
+# TLuqDQhTQXxYPUez+rbsjDIJAsxsPAxWEQIDAQABo4IBWTCCAVUwEgYDVR0TAQH/
+# BAgwBgEB/wIBADAdBgNVHQ4EFgQUaDfg67Y7+F8Rhvv+YXsIiGX0TkIwHwYDVR0j
+# BBgwFoAU7NfjgtJxXWRM3y5nP+e6mK4cD08wDgYDVR0PAQH/BAQDAgGGMBMGA1Ud
+# JQQMMAoGCCsGAQUFBwMDMHcGCCsGAQUFBwEBBGswaTAkBggrBgEFBQcwAYYYaHR0
+# cDovL29jc3AuZGlnaWNlcnQuY29tMEEGCCsGAQUFBzAChjVodHRwOi8vY2FjZXJ0
+# cy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNydDBDBgNVHR8E
+# PDA6MDigNqA0hjJodHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVz
+# dGVkUm9vdEc0LmNybDAcBgNVHSAEFTATMAcGBWeBDAEDMAgGBmeBDAEEATANBgkq
+# hkiG9w0BAQwFAAOCAgEAOiNEPY0Idu6PvDqZ01bgAhql+Eg08yy25nRm95RysQDK
+# r2wwJxMSnpBEn0v9nqN8JtU3vDpdSG2V1T9J9Ce7FoFFUP2cvbaF4HZ+N3HLIvda
+# qpDP9ZNq4+sg0dVQeYiaiorBtr2hSBh+3NiAGhEZGM1hmYFW9snjdufE5BtfQ/g+
+# lP92OT2e1JnPSt0o618moZVYSNUa/tcnP/2Q0XaG3RywYFzzDaju4ImhvTnhOE7a
+# brs2nfvlIVNaw8rpavGiPttDuDPITzgUkpn13c5UbdldAhQfQDN8A+KVssIhdXNS
+# y0bYxDQcoqVLjc1vdjcshT8azibpGL6QB7BDf5WIIIJw8MzK7/0pNVwfiThV9zeK
+# iwmhywvpMRr/LhlcOXHhvpynCgbWJme3kuZOX956rEnPLqR0kq3bPKSchh/jwVYb
+# KyP/j7XqiHtwa+aguv06P0WmxOgWkVKLQcBIhEuWTatEQOON8BUozu3xGFYHKi8Q
+# xAwIZDwzj64ojDzLj4gLDb879M4ee47vtevLt/B3E+bnKD+sEq6lLyJsQfmCXBVm
+# zGwOysWGw/YmMwwHS6DTBwJqakAwSEs0qFEgu60bhQjiWQ1tygVQK+pKHJ6l/aCn
+# HwZ05/LWUpD9r4VIIflXO7ScA+2GRfS0YW6/aOImYIbqyK+p/pQd52MbOoZWeE4w
+# gga0MIIEnKADAgECAhANx6xXBf8hmS5AQyIMOkmGMA0GCSqGSIb3DQEBCwUAMGIx
+# CzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3
+# dy5kaWdpY2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0IFRydXN0ZWQgUm9vdCBH
+# NDAeFw0yNTA1MDcwMDAwMDBaFw0zODAxMTQyMzU5NTlaMGkxCzAJBgNVBAYTAlVT
+# MRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1
+# c3RlZCBHNCBUaW1lU3RhbXBpbmcgUlNBNDA5NiBTSEEyNTYgMjAyNSBDQTEwggIi
+# MA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQC0eDHTCphBcr48RsAcrHXbo0Zo
+# dLRRF51NrY0NlLWZloMsVO1DahGPNRcybEKq+RuwOnPhof6pvF4uGjwjqNjfEvUi
+# 6wuim5bap+0lgloM2zX4kftn5B1IpYzTqpyFQ/4Bt0mAxAHeHYNnQxqXmRinvuNg
+# xVBdJkf77S2uPoCj7GH8BLuxBG5AvftBdsOECS1UkxBvMgEdgkFiDNYiOTx4OtiF
+# cMSkqTtF2hfQz3zQSku2Ws3IfDReb6e3mmdglTcaarps0wjUjsZvkgFkriK9tUKJ
+# m/s80FiocSk1VYLZlDwFt+cVFBURJg6zMUjZa/zbCclF83bRVFLeGkuAhHiGPMvS
+# GmhgaTzVyhYn4p0+8y9oHRaQT/aofEnS5xLrfxnGpTXiUOeSLsJygoLPp66bkDX1
+# ZlAeSpQl92QOMeRxykvq6gbylsXQskBBBnGy3tW/AMOMCZIVNSaz7BX8VtYGqLt9
+# MmeOreGPRdtBx3yGOP+rx3rKWDEJlIqLXvJWnY0v5ydPpOjL6s36czwzsucuoKs7
+# Yk/ehb//Wx+5kMqIMRvUBDx6z1ev+7psNOdgJMoiwOrUG2ZdSoQbU2rMkpLiQ6bG
+# RinZbI4OLu9BMIFm1UUl9VnePs6BaaeEWvjJSjNm2qA+sdFUeEY0qVjPKOWug/G6
+# X5uAiynM7Bu2ayBjUwIDAQABo4IBXTCCAVkwEgYDVR0TAQH/BAgwBgEB/wIBADAd
+# BgNVHQ4EFgQU729TSunkBnx6yuKQVvYv1Ensy04wHwYDVR0jBBgwFoAU7NfjgtJx
+# XWRM3y5nP+e6mK4cD08wDgYDVR0PAQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUF
+# BwMIMHcGCCsGAQUFBwEBBGswaTAkBggrBgEFBQcwAYYYaHR0cDovL29jc3AuZGln
+# aWNlcnQuY29tMEEGCCsGAQUFBzAChjVodHRwOi8vY2FjZXJ0cy5kaWdpY2VydC5j
+# b20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNydDBDBgNVHR8EPDA6MDigNqA0hjJo
+# dHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNy
+# bDAgBgNVHSAEGTAXMAgGBmeBDAEEAjALBglghkgBhv1sBwEwDQYJKoZIhvcNAQEL
+# BQADggIBABfO+xaAHP4HPRF2cTC9vgvItTSmf83Qh8WIGjB/T8ObXAZz8OjuhUxj
+# aaFdleMM0lBryPTQM2qEJPe36zwbSI/mS83afsl3YTj+IQhQE7jU/kXjjytJgnn0
+# hvrV6hqWGd3rLAUt6vJy9lMDPjTLxLgXf9r5nWMQwr8Myb9rEVKChHyfpzee5kH0
+# F8HABBgr0UdqirZ7bowe9Vj2AIMD8liyrukZ2iA/wdG2th9y1IsA0QF8dTXqvcnT
+# mpfeQh35k5zOCPmSNq1UH410ANVko43+Cdmu4y81hjajV/gxdEkMx1NKU4uHQcKf
+# ZxAvBAKqMVuqte69M9J6A47OvgRaPs+2ykgcGV00TYr2Lr3ty9qIijanrUR3anzE
+# wlvzZiiyfTPjLbnFRsjsYg39OlV8cipDoq7+qNNjqFzeGxcytL5TTLL4ZaoBdqbh
+# OhZ3ZRDUphPvSRmMThi0vw9vODRzW6AxnJll38F0cuJG7uEBYTptMSbhdhGQDpOX
+# gpIUsWTjd6xpR6oaQf/DJbg3s6KCLPAlZ66RzIg9sC+NJpud/v4+7RWsWCiKi9EO
+# LLHfMR2ZyJ/+xhCx9yHbxtl5TPau1j/1MIDpMPx0LckTetiSuEtQvLsNz3Qbp7wG
+# WqbIiOWCnb5WqxL3/BAPvIXKUjPSxyZsq8WhbaM2tszWkPZPubdcMIIG7TCCBNWg
+# AwIBAgIQCoDvGEuN8QWC0cR2p5V0aDANBgkqhkiG9w0BAQsFADBpMQswCQYDVQQG
+# EwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0
+# IFRydXN0ZWQgRzQgVGltZVN0YW1waW5nIFJTQTQwOTYgU0hBMjU2IDIwMjUgQ0Ex
+# MB4XDTI1MDYwNDAwMDAwMFoXDTM2MDkwMzIzNTk1OVowYzELMAkGA1UEBhMCVVMx
+# FzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMTswOQYDVQQDEzJEaWdpQ2VydCBTSEEy
+# NTYgUlNBNDA5NiBUaW1lc3RhbXAgUmVzcG9uZGVyIDIwMjUgMTCCAiIwDQYJKoZI
+# hvcNAQEBBQADggIPADCCAgoCggIBANBGrC0Sxp7Q6q5gVrMrV7pvUf+GcAoB38o3
+# zBlCMGMyqJnfFNZx+wvA69HFTBdwbHwBSOeLpvPnZ8ZN+vo8dE2/pPvOx/Vj8Tch
+# TySA2R4QKpVD7dvNZh6wW2R6kSu9RJt/4QhguSssp3qome7MrxVyfQO9sMx6ZAWj
+# FDYOzDi8SOhPUWlLnh00Cll8pjrUcCV3K3E0zz09ldQ//nBZZREr4h/GI6Dxb2Uo
+# yrN0ijtUDVHRXdmncOOMA3CoB/iUSROUINDT98oksouTMYFOnHoRh6+86Ltc5zjP
+# KHW5KqCvpSduSwhwUmotuQhcg9tw2YD3w6ySSSu+3qU8DD+nigNJFmt6LAHvH3KS
+# uNLoZLc1Hf2JNMVL4Q1OpbybpMe46YceNA0LfNsnqcnpJeItK/DhKbPxTTuGoX7w
+# JNdoRORVbPR1VVnDuSeHVZlc4seAO+6d2sC26/PQPdP51ho1zBp+xUIZkpSFA8vW
+# doUoHLWnqWU3dCCyFG1roSrgHjSHlq8xymLnjCbSLZ49kPmk8iyyizNDIXj//cOg
+# rY7rlRyTlaCCfw7aSUROwnu7zER6EaJ+AliL7ojTdS5PWPsWeupWs7NpChUk555K
+# 096V1hE0yZIXe+giAwW00aHzrDchIc2bQhpp0IoKRR7YufAkprxMiXAJQ1XCmnCf
+# gPf8+3mnAgMBAAGjggGVMIIBkTAMBgNVHRMBAf8EAjAAMB0GA1UdDgQWBBTkO/zy
+# Me39/dfzkXFjGVBDz2GM6DAfBgNVHSMEGDAWgBTvb1NK6eQGfHrK4pBW9i/USezL
+# TjAOBgNVHQ8BAf8EBAMCB4AwFgYDVR0lAQH/BAwwCgYIKwYBBQUHAwgwgZUGCCsG
+# AQUFBwEBBIGIMIGFMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5j
+# b20wXQYIKwYBBQUHMAKGUWh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdp
+# Q2VydFRydXN0ZWRHNFRpbWVTdGFtcGluZ1JTQTQwOTZTSEEyNTYyMDI1Q0ExLmNy
+# dDBfBgNVHR8EWDBWMFSgUqBQhk5odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGln
+# aUNlcnRUcnVzdGVkRzRUaW1lU3RhbXBpbmdSU0E0MDk2U0hBMjU2MjAyNUNBMS5j
+# cmwwIAYDVR0gBBkwFzAIBgZngQwBBAIwCwYJYIZIAYb9bAcBMA0GCSqGSIb3DQEB
+# CwUAA4ICAQBlKq3xHCcEua5gQezRCESeY0ByIfjk9iJP2zWLpQq1b4URGnwWBdEZ
+# D9gBq9fNaNmFj6Eh8/YmRDfxT7C0k8FUFqNh+tshgb4O6Lgjg8K8elC4+oWCqnU/
+# ML9lFfim8/9yJmZSe2F8AQ/UdKFOtj7YMTmqPO9mzskgiC3QYIUP2S3HQvHG1FDu
+# +WUqW4daIqToXFE/JQ/EABgfZXLWU0ziTN6R3ygQBHMUBaB5bdrPbF6MRYs03h4o
+# bEMnxYOX8VBRKe1uNnzQVTeLni2nHkX/QqvXnNb+YkDFkxUGtMTaiLR9wjxUxu2h
+# ECZpqyU1d0IbX6Wq8/gVutDojBIFeRlqAcuEVT0cKsb+zJNEsuEB7O7/cuvTQasn
+# M9AWcIQfVjnzrvwiCZ85EE8LUkqRhoS3Y50OHgaY7T/lwd6UArb+BOVAkg2oOvol
+# /DJgddJ35XTxfUlQ+8Hggt8l2Yv7roancJIFcbojBcxlRcGG0LIhp6GvReQGgMgY
+# xQbV1S3CrWqZzBt1R9xJgKf47CdxVRd/ndUlQ05oxYy2zRWVFjF7mcr4C34Mj3oc
+# CVccAvlKV9jEnstrniLvUxxVZE/rptb7IRE2lskKPIJgbaP5t2nGj/ULLi49xTcB
+# ZU8atufk+EMF/cWuiC7POGT75qaL6vdCvHlshtjdNXOCIUjsarfNZzCCB20wggVV
+# oAMCAQICEAnI7Fw0fQcgWcyoNeinb/gwDQYJKoZIhvcNAQELBQAwaTELMAkGA1UE
+# BhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2Vy
+# dCBUcnVzdGVkIEc0IENvZGUgU2lnbmluZyBSU0E0MDk2IFNIQTM4NCAyMDIxIENB
+# MTAeFw0yMzAzMjkwMDAwMDBaFw0yNjA2MjIyMzU5NTlaMHUxCzAJBgNVBAYTAkFV
+# MRgwFgYDVQQIEw9OZXcgU291dGggV2FsZXMxFDASBgNVBAcTC0NoZXJyeWJyb29r
+# MRowGAYDVQQKExFEYXJyZW4gSiBSb2JpbnNvbjEaMBgGA1UEAxMRRGFycmVuIEog
+# Um9iaW5zb24wggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAwggIKAoICAQDHrKfntVGe
+# XaDp6S/nqZuiKuhmIqivGTXM9VwXuzO3gV8FcuLWD+QciGujTkWBLHpVViPV5jtT
+# PnD0uo0TK6WW/cbVB/jaSmTvnkrYYEwLZxDtXVmgCumOwB/2VY5oDk1mVwVYm4wB
+# PyUCiH2cseB5uRTh+oat27JQPkVEKaNzUMTb9gLs3JCkMG1uwKFyDbnY9HbmAog2
+# LIZ//Zh884C9FaTWEaZoBGu1loHNSR9e1fkmJWn+qjFqWKFrjg8Lg5bUh9qee6gC
+# Nv+Ceq1GBL57O0GfbICFHRpVK+fen6dGOI7sqclRhO0a9GvD7Qci1lLqcle2eZCj
+# 6/zEY3q1wJgZ3+gHYSN5GOho89+en2ZDwOPVLgiFxYMk2U/OAKOipcPtEaie9CQ7
+# eOPVJMu4XWvofIdj4lHX+610Gplee5mOufpRwJnOPlIE7lrJ6cJ07jZZG2cUZwsN
+# g/lt6raNmgYQ3m3Iimc4r34gFpVn03B7QqcveoDOS/jgeOXsw6VOigB9YcEUozkV
+# JVucqBU11Gz1AUX5VNztm2dMHQCXslGGh1gGsjaMhX7ina5gi7SMe9ujtOnc/SoP
+# nCX/tWXSeynFL2YEdnfBdfRVeRtQlTJzs4TGUdnZyHieYdBIHDijR5d4TChXVUce
+# JYVvLXK0EDeGU9hIBnyPXwXNItxl0xQNMQIDAQABo4ICAzCCAf8wHwYDVR0jBBgw
+# FoAUaDfg67Y7+F8Rhvv+YXsIiGX0TkIwHQYDVR0OBBYEFAUxVql07mJzafndN3rN
+# ijPSXRlIMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzCBtQYD
+# VR0fBIGtMIGqMFOgUaBPhk1odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNl
+# cnRUcnVzdGVkRzRDb2RlU2lnbmluZ1JTQTQwOTZTSEEzODQyMDIxQ0ExLmNybDBT
+# oFGgT4ZNaHR0cDovL2NybDQuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZEc0
+# Q29kZVNpZ25pbmdSU0E0MDk2U0hBMzg0MjAyMUNBMS5jcmwwPgYDVR0gBDcwNTAz
+# BgZngQwBBAEwKTAnBggrBgEFBQcCARYbaHR0cDovL3d3dy5kaWdpY2VydC5jb20v
+# Q1BTMIGUBggrBgEFBQcBAQSBhzCBhDAkBggrBgEFBQcwAYYYaHR0cDovL29jc3Au
+# ZGlnaWNlcnQuY29tMFwGCCsGAQUFBzAChlBodHRwOi8vY2FjZXJ0cy5kaWdpY2Vy
+# dC5jb20vRGlnaUNlcnRUcnVzdGVkRzRDb2RlU2lnbmluZ1JTQTQwOTZTSEEzODQy
+# MDIxQ0ExLmNydDAJBgNVHRMEAjAAMA0GCSqGSIb3DQEBCwUAA4ICAQBYQAlozzK3
+# Gn8A32eZnv51K5L+MmICIud+XHXTwJv9rMBg07s0lQVRyDAafC1i5s1zwNRm8QTp
+# gOC/L7w4IxKUBfSPT4eTDWIGIYNMUqQCKffygKHODkJ8JckRjzfgo2smONMcU8+P
+# 4R6IVoOK5yTCLlRI5DLSpzHU26Z6lPOcO/AEJXw+/b/4FkNnS9U959fBzhI07fFU
+# rq8ZBIUOSN0h/Aq/WIVL/eDm1iFGzilLeUhu5v3fstpn5CkUjpkZbi0qGCz1m8d+
+# aQK7GJGj6Y3+WJeY4iT2NxkMxFP0kVVtK68AwG7SkjdIClrWcYozw27PGkFGAoox
+# X43ujlhheEZ5j0kIdBX/AMsz0HMfS40P/Fu4FBC7BOiBblz+W49ouoHi8uuS0XuO
+# kGZWA6v2zGs1KGUE5Y3v4bOqZDi+H9Sr+7WyWZjBDVVVESTZng0Xo7zZYh2mhhAL
+# /4hdGaO6ar4+MAgghht4/7DUeVkkWJ8X+cUOK/YvYGapOMo8JPwyQltq5ijQlKMT
+# SGVodhCJTEg88NwzCpNspWXYmPywIuRpmwshi7erE8/yBNcNTWMK6f8+r+CPdZQ4
+# HV4Pn05IYcbeO4VpozDg92WFUhc0JoPGpdYkP/ukWCoH7MMOuLSJMvCTjmV/97LP
+# 7ocSlIzycWCZDsEMFMqAGM43LvwBOwctKzGCBlkwggZVAgEBMH0waTELMAkGA1UE
+# BhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMUEwPwYDVQQDEzhEaWdpQ2Vy
+# dCBUcnVzdGVkIEc0IENvZGUgU2lnbmluZyBSU0E0MDk2IFNIQTM4NCAyMDIxIENB
+# MQIQCcjsXDR9ByBZzKg16Kdv+DANBglghkgBZQMEAgEFAKCBhDAYBgorBgEEAYI3
+# AgEMMQowCKACgAChAoAAMBkGCSqGSIb3DQEJAzEMBgorBgEEAYI3AgEEMBwGCisG
+# AQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqGSIb3DQEJBDEiBCAfhMHX0Prz
+# 0HRrBghuHZzw6n+kakzj6+x2EnAqWMJwajANBgkqhkiG9w0BAQEFAASCAgCHXpn+
+# 10d4xy+vv7NQgYB9pTsWNtGyctL3mfX6joVylBec+58YFDgdqJRZAtXmF6gCFqtj
+# Zb83IU6lZPwrvh+vtz1OpeYwHqOoeNwSe9ew28mrPNzH1xsaecrIHxFTJ9Z3OGDW
+# rwJJ/5j3BEMM18tSxuNSb58HJn+piXiX/BZlr3acFL+dFgHxH/kUO6e8D4YNGCSP
+# 2rCmC9bBj43Uj5dQrsDMZN0Ud6saUzHpo5hSVndrmgOV1bNc4C5IqAyFVTJSEJHX
+# aQYixxAzxbtmyueKRSWqRykYLusPI5iJCXnQfsxTmvOlt9TeTGE7GYWcOD5lrsyQ
+# 4EFrnCyDXw21p82Htu9bAfNL7VSwaitqwWxwbvBQp6mpFVwTQICgu7Vtle2Db9fq
+# iVF03tfkBUpd//FGhfTdB9dQ/ptdYOTLfvxJiglT6BFqZ+ACCKIYDj6SadWyYZne
+# uFLIaNZbyT0N9N/jg9nQESFWIAlMLS8tPBiRBFsV+oME3x4Om0UK3WWvlUrampjZ
+# SS/9z7Wip2g+9DEJkRIWWoUt3WAnBIbSiX58543lF0x+iMxjG6YLXvgxlzM4EJqx
+# HsfsspituQSdVGvv+fd+gH6HnF8V0tdJkR2h/WZkgmzR3N089HJIoUbzvhgJBOCX
+# CQDioeHZd6UR1G+CCvM5CNhHcSuQPEhsXCaxdKGCAyYwggMiBgkqhkiG9w0BCQYx
+# ggMTMIIDDwIBATB9MGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwg
+# SW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBUaW1lU3RhbXBpbmcg
+# UlNBNDA5NiBTSEEyNTYgMjAyNSBDQTECEAqA7xhLjfEFgtHEdqeVdGgwDQYJYIZI
+# AWUDBAIBBQCgaTAYBgkqhkiG9w0BCQMxCwYJKoZIhvcNAQcBMBwGCSqGSIb3DQEJ
+# BTEPFw0yNTEyMDkwMTEyNDdaMC8GCSqGSIb3DQEJBDEiBCCShgRbnMut6/Gwr8ww
+# lO9+0yh9aG7vbmFNB/8feuYouzANBgkqhkiG9w0BAQEFAASCAgBqFvTwbb1fz6+F
+# KHW4g8AzKZJeA1ZvEdJhAEPn9ak8dbbU6rePscJnOJKNIuoKLIywbUJYuUKuwgLv
+# ZMCFKgpd+RnZb/cbdg/KAeGgt+jYtt5u3doEUWViHp50eSipdPG6PIQNLhtTBbji
+# K6mFsgN+zeFrKkQLCWLCGQjy+6KShfZ6ue5ilw1Lj0IX+sOQLI7T8uaW1MEY6HPn
+# nWUncPTfshQNBjm8a8oMX/3ty9ggun14X3e6/N9pK8EtjO7nUQbAXmefd0wainRl
+# NHPq2uBrLvOvYsjcg/GeLDNm/nVYiuSos37t2n6S+7CXV8J5ueJxLToTT9SnZd8n
+# Y6cAHqoPHYGzWDBtKAVAGGD+qigN5CW/dXR8UOS3j4IMBzZb7O0vH5hQlVlLJvp2
+# 7NGBY/r+cug8hOyif5cLCrd/9yC15J/PoGTsntkHsMQFGjnUaXMelUUsBwSu+W+7
+# MScwrdCJAWUI218ydjTzrtb2GQfD3ANYBA+i06XbA682ApSDblLdZos4OSViWg1L
+# vV5CbTI4Z+TChrBx17ll/Naa2IYsnBsAdeRKtk4Dn9kq7Epm6kAKU78trUDZ4a+9
+# hQHHgEC01L0SfSvPo9uCko3UgDohh2JAMvKsq3LYCOqpzimv3TAeAHB/EuDHFL24
+# FVrCjaTEzOUe9ZlbdfNxLSglBbqJTA==
+# SIG # End signature block

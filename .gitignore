@@ -37,3 +37,10 @@ tmp/
 *secret.txt
 *password.txt
 Configuration.xml
+
+# Internal ops runbook - contains environment-specific detail (tenant/app IDs, cert
+# thumbprints, service account names) and is not meant for the public repo
+ESCROW Automation.md
+
+# Draft blog posts - not repo documentation, kept local until published
+BLOGPOST-*.md

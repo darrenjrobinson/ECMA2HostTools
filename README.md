@@ -99,7 +99,7 @@ cd ECMA2HostTools
 ### Run Profile Monitoring
 - `Get-ECMA2ConnectorRunHistory` - Gets the run history for a connector
 
-> **Note**: ECMA2Host does not provide an API or UI to manually trigger run profiles. Run profiles are automatically executed by Microsoft Entra provisioning service or by configured autosync timers on the connectors.
+> **Note**: ECMA2Host does not provide an API or UI to manually trigger run profiles. Run profiles are automatically executed by Microsoft Entra provisioning service or by configured autosync timers on the connectors. The one exception is clearing a stuck escrow/quarantine state via `Restart-ECMA2ConnectorSyncJob` below, which calls the cloud provisioning job directly via Microsoft Graph.
 
 ### Configuration Management
 - `Export-ECMA2ConnectorConfiguration` - Exports a single connector configuration to JSON
@@ -109,6 +109,14 @@ cd ECMA2HostTools
 
 ### Documentation
 - `New-ECMA2ConnectorDocumentation` - Generates markdown documentation for connectors
+
+### Cloud Provisioning Job Management (Microsoft Graph)
+- `Connect-ECMA2Graph` - Authenticates to Microsoft Graph (interactive device code, app-only client secret, app-only certificate, or a bring-your-own access token)
+- `Disconnect-ECMA2Graph` - Clears the current Microsoft Graph connection
+- `Get-ECMA2ConnectorSyncJob` - Gets a cloud provisioning synchronization job's schedule/status, including whether it is currently running
+- `Pause-ECMA2ConnectorSyncJob` - Pauses a cloud provisioning synchronization job; progress and job state are preserved
+- `Start-ECMA2ConnectorSyncJob` - Starts/resumes a cloud provisioning synchronization job, or clears quarantine
+- `Restart-ECMA2ConnectorSyncJob` - Restarts a cloud provisioning synchronization job, most commonly to reset escrows
 
 ## Usage Examples
 
@@ -718,12 +726,73 @@ $doc = Get-ECMA2Connector | New-ECMA2ConnectorDocumentation -Path "C:\Docs\All.m
 $doc | Format-List
 ```
 
+### Cloud Provisioning Job Management (Pause / Start / Reset Escrows / Restart)
+
+Every provisioning job is associated with a service principal (the enterprise application containing the provisioning configuration). You need the service principal's object ID and the synchronization job ID before pausing, starting, or resetting anything - use `Get-ECMA2ConnectorSyncJob` to confirm both and see the job's current status.
+
+This capability requires `Synchronization.ReadWrite.All` (or `Synchronization.Read.All` for read-only) and calls Microsoft Graph directly - no Microsoft Graph SDK module is required.
+
+> **Certificate auth note**: If `Connect-ECMA2Graph -CertificateThumbprint` fails to sign the client assertion, check that the running account has been granted **Read** access to the certificate's private key (`certmgr.msc`/`certlm.msc` → right-click the certificate → **All Tasks** → **Manage Private Keys**). Installing the certificate alone does not grant this - it's commonly missed when the certificate was imported under a different account than the one running the script.
+
+**`-ResetScope` caution table** (from Microsoft's [synchronizationJobRestartCriteria](https://learn.microsoft.com/en-us/graph/api/resources/synchronization-synchronizationjobrestartcriteria) docs):
+
+| Value | Effect | Caution |
+|---|---|---|
+| `Escrows` (default) | Retries provisioning failures marked as escrows | primary use case |
+| `Watermark` | Clears the watermark, forcing a full re-evaluation of all objects | causes a full resync |
+| `QuarantineState` | Lifts quarantine | |
+| `ForceDeletes` | Forces pending deletes through the accidental-deletion threshold | |
+| `Full` | All of the above combined | the "abort and recover" reset - can be used even while the job is running |
+| `None` | Starts a paused job | Microsoft: do not use - blocked unless `-Force` |
+| `ConnectorDataStore` | Clears the per-user cache | Microsoft: do not use without contacting Support - blocked unless `-Force` |
+
+```powershell
+# Connect interactively - device code flow, same sign-in experience as Graph Explorer
+Connect-ECMA2Graph
+
+# Or connect for unattended automation with app-only client credentials
+$secret = Read-Host "Client secret" -AsSecureString
+Connect-ECMA2Graph -TenantId "contoso.onmicrosoft.com" -ClientId $appId -ClientSecret $secret
+
+# Or with a certificate instead of a shared secret
+Connect-ECMA2Graph -TenantId "contoso.onmicrosoft.com" -ClientId $appId -CertificateThumbprint $thumbprint
+
+# Confirm the job details first
+Get-ECMA2ConnectorSyncJob -ServicePrincipalId $spId -JobId $jobId
+
+# Pause a running job - progress and state are preserved for a later Start
+Pause-ECMA2ConnectorSyncJob -ServicePrincipalId $spId -JobId $jobId
+
+# Start/resume a paused job, or clear quarantine on a quarantined job
+Start-ECMA2ConnectorSyncJob -ServicePrincipalId $spId -JobId $jobId
+
+# Reset escrows (the default and primary use case) - retries previously failed provisioning operations
+Restart-ECMA2ConnectorSyncJob -ServicePrincipalId $spId -JobId $jobId
+
+# Preview without calling Graph
+Restart-ECMA2ConnectorSyncJob -ServicePrincipalId $spId -JobId $jobId -WhatIf
+
+# Full restart - the deliberate "abort and recover" reset, allowed even while the job is running
+Restart-ECMA2ConnectorSyncJob -ServicePrincipalId $spId -JobId $jobId -ResetScope Full
+
+# A blocked reset scope requires an explicit acknowledgement
+Restart-ECMA2ConnectorSyncJob -ServicePrincipalId $spId -JobId $jobId -ResetScope ConnectorDataStore -Force
+
+Disconnect-ECMA2Graph
+```
+
 ### Backup and Restore Configuration
 ```powershell
 # Backup complete ECMA2Host configuration (all connectors + host settings)
-Backup-ECMA2HostConfiguration -Path "C:\Backups\ECMA2Host_$(Get-Date -Format 'yyyyMMdd').xml"
+$backup = Backup-ECMA2HostConfiguration -Path "C:\Backups\ECMA2Host_$(Get-Date -Format 'yyyyMMdd').xml"
 
 # Restore complete configuration
+Restore-ECMA2HostConfiguration -Path "C:\Backups\ECMA2Host_20251204.xml"
+
+# View backup/restore summary
+$backup | Format-List
+```
+
 ## Requirements
 
 - PowerShell 5.1 or later (PowerShell 7+ supported with automatic fallback for decryption)
@@ -740,16 +809,18 @@ Backup-ECMA2HostConfiguration -Path "C:\Backups\ECMA2Host_$(Get-Date -Format 'yy
   - File system permissions to read the Configuration.xml file
   - Either map a network drive or use UNC paths with the `-ConfigurationPath` parameter
 - **Secret Decryption**: Must be performed locally on the ECMA2Host server (cannot decrypt secrets from remote configuration files)
-$backup | Format-List
-```
 
-## Requirements
+### Entra Cloud Provisioning (Microsoft Graph) Requirements
 
-- PowerShell 5.1 or later (PowerShell 7+ supported with automatic fallback for decryption)
-- ECMA2Host installed on the target system
-- **Administrator privileges required** for service management operations (Start/Stop/Resume)
-- Appropriate permissions to manage services and connectors
-- **Secret decryption must run on the same machine** where ECMA2Host is installed
+Prerequisites for `Connect-ECMA2Graph`, `Get-ECMA2ConnectorSyncJob`, `Pause-ECMA2ConnectorSyncJob`, `Start-ECMA2ConnectorSyncJob`, and `Restart-ECMA2ConnectorSyncJob` (e.g. to pause/resume a job or reset stuck escrows/quarantine):
+
+- No Microsoft Graph SDK or MSAL module required - authentication and calls use direct REST requests, keeping the module dependency-free
+- **Graph permission**: `Synchronization.Read.All` to read job status, or `Synchronization.ReadWrite.All` to restart/reset jobs
+- **Interactive sign-in** (device code, default): the signed-in delegated user must hold `Synchronization.ReadWrite.All` (via role or consent) and be an owner/member of the target service principal, or hold Application Administrator, Cloud Application Administrator, or Hybrid Identity Administrator
+- **App-only sign-in** (client secret or certificate): requires an app registration granted the Graph application permission with admin consent, plus the client secret or a certificate (with private key) installed in `Cert:\CurrentUser\My` or `Cert:\LocalMachine\My`
+- **Certificate private key permissions**: the identity running the script needs read access to the certificate's private key, or signing the client assertion fails. In `certmgr.msc`/`certlm.msc`, right-click the certificate → **All Tasks** → **Manage Private Keys** → grant the running user (or service account) **Read** access. This is a separate step from installing the certificate itself, and is easy to miss when the cert was provisioned or imported by a different account
+- Outbound HTTPS network access from the machine running the cmdlets to `login.microsoftonline.com` and `graph.microsoft.com`
+- The target service principal's object ID and synchronization job ID - use `Get-ECMA2ConnectorSyncJob` to confirm both before calling `Restart-ECMA2ConnectorSyncJob`
 
 ## Development Status
 
@@ -770,6 +841,12 @@ $backup | Format-List
 - ✅ `Get-ECMA2HostStatus` - Fully implemented with PowerShell 5.1 compatibility
 - ✅ `Start-ECMA2Host` - Fully implemented with pause/resume support, requires Administrator
 - ✅ `Stop-ECMA2Host` - Fully implemented with force option, requires Administrator
+- ✅ `Connect-ECMA2Graph` - Fully implemented, dependency-free Microsoft Graph authentication (interactive device code, app-only client secret, app-only certificate, or bring-your-own access token); tested in Dev and Prod Entra environments
+- ✅ `Disconnect-ECMA2Graph` - Fully implemented, clears the current Microsoft Graph connection; tested in Dev and Prod Entra environments
+- ✅ `Get-ECMA2ConnectorSyncJob` - Fully implemented, retrieves Entra cloud provisioning synchronization job schedule/status via Microsoft Graph; tested in Dev and Prod Entra environments
+- ✅ `Restart-ECMA2ConnectorSyncJob` - Fully implemented, restarts a cloud provisioning synchronization job with configurable `-ResetScope` to clear stuck escrows/quarantine; tested in Dev and Prod Entra environments
+- ✅ `Pause-ECMA2ConnectorSyncJob` - Fully implemented, pauses a cloud provisioning synchronization job via Microsoft Graph, preserving progress/state; tested in Dev and Prod Entra environments
+- ✅ `Start-ECMA2ConnectorSyncJob` - Fully implemented, starts/resumes a cloud provisioning synchronization job via Microsoft Graph, or clears quarantine; tested in Dev and Prod Entra environments
 
 ## Author
 

@@ -49,6 +49,13 @@ This directory contains example scripts demonstrating how to use the ECMA2HostTo
 - Generate markdown documentation for each connector
 - Create a complete backup with documentation
 
+### Reset Sync Job Escrows After Cycle
+`Reset-SyncJobEscrowsAfterCycle.ps1` - Wait for a cloud provisioning job to finish, then reset its escrows
+- Connect to Microsoft Graph interactively (device code flow)
+- Auto-discover the synchronization job for a service principal
+- Poll until the job's current cycle completes
+- Wait a settling period, then reset escrows via Restart-ECMA2ConnectorSyncJob
+
 ## Usage
 
 Each example script can be run independently:
@@ -68,6 +75,9 @@ Each example script can be run independently:
 
 # Export all connectors with documentation
 .\Examples\Export-AllConnectorsWithDocs.ps1
+
+# Wait for a provisioning job cycle to finish, then reset escrows
+.\Examples\Reset-SyncJobEscrowsAfterCycle.ps1 -ServicePrincipalId $spId
 ```
 
 Make sure the ECMA2HostTools module is imported before running examples:

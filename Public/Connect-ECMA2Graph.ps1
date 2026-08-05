@@ -18,6 +18,8 @@ function Connect-ECMA2Graph {
           assertion, for automation without storing a shared secret.
         - AccessToken: use a token already obtained some other way (e.g. copied from
           Graph Explorer). This mode cannot self-refresh; reconnect when it expires.
+          ExpiresOn is read from the token's own 'exp' claim when it's a parseable
+          JWT, falling back to 60 minutes from now otherwise.
 
     .PARAMETER TenantId
         The tenant ID or verified domain to authenticate against. Defaults to
@@ -109,9 +111,10 @@ function Connect-ECMA2Graph {
 
                 $expiresAt = (Get-Date).AddSeconds($deviceCodeResponse.expires_in)
                 $tokenResponse = $null
+                $pollingInterval = $deviceCodeResponse.interval
 
                 while ((Get-Date) -lt $expiresAt) {
-                    Start-Sleep -Seconds $deviceCodeResponse.interval
+                    Start-Sleep -Seconds $pollingInterval
                     try {
                         $tokenResponse = Invoke-RestMethod -Method Post -Uri $tokenEndpoint -Body @{
                             grant_type  = 'urn:ietf:params:oauth:grant-type:device_code'
@@ -126,6 +129,11 @@ function Connect-ECMA2Graph {
                             $errorBody = $_.ErrorDetails.Message | ConvertFrom-Json -ErrorAction SilentlyContinue
                         }
                         if ($errorBody -and $errorBody.error -eq 'authorization_pending') {
+                            continue
+                        }
+                        if ($errorBody -and $errorBody.error -eq 'slow_down') {
+                            # Per RFC 8628, back off polling by 5 seconds and keep waiting.
+                            $pollingInterval += 5
                             continue
                         }
                         if ($errorBody -and $errorBody.error_description) {
@@ -218,6 +226,26 @@ function Connect-ECMA2Graph {
                 $plainToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
                 [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
 
+                # Best-effort: read the 'exp' claim out of the JWT payload so ExpiresOn
+                # reflects the token's real expiry rather than an arbitrary guess. Falls
+                # back to a 60-minute default if the token isn't a parseable JWT.
+                $expiresOn = (Get-Date).AddMinutes(60)
+                try {
+                    $payload = $plainToken.Split('.')[1]
+                    $payload = $payload.Replace('-', '+').Replace('_', '/')
+                    switch ($payload.Length % 4) {
+                        2 { $payload += '==' }
+                        3 { $payload += '=' }
+                    }
+                    $claims = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload)) | ConvertFrom-Json
+                    if ($claims.exp) {
+                        $expiresOn = [System.DateTimeOffset]::FromUnixTimeSeconds([int64]$claims.exp).LocalDateTime
+                    }
+                }
+                catch {
+                    Write-Verbose "Could not parse an 'exp' claim from the supplied access token; defaulting ExpiresOn to 60 minutes from now."
+                }
+
                 $script:ECMA2GraphContext = [PSCustomObject]@{
                     AuthMode     = 'AccessToken'
                     TenantId     = $null
@@ -227,9 +255,9 @@ function Connect-ECMA2Graph {
                     Certificate  = $null
                     ClientSecret = $null
                     Scopes       = @()
-                    ExpiresOn    = (Get-Date).AddMinutes(60)
+                    ExpiresOn    = $expiresOn
                 }
-                Write-Warning "Bring-your-own access token cannot be automatically refreshed or validated for expiry. Reconnect with a fresh token if requests start failing with 401."
+                Write-Warning "Bring-your-own access token cannot be automatically refreshed. Reconnect with a fresh token if requests start failing with 401 or once ExpiresOn ($expiresOn) passes."
             }
         }
 

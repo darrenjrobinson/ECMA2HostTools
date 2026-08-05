@@ -38,7 +38,13 @@ function Get-ECMA2GraphToken {
                     refresh_token = $context.RefreshToken
                     scope         = ($context.Scopes -join ' ')
                 } -ContentType 'application/x-www-form-urlencoded'
-                $context.RefreshToken = $response.refresh_token
+                # Some refresh responses omit refresh_token (the identity platform may
+                # reuse the existing one) - only overwrite it when a new value is
+                # actually returned, otherwise the cached refresh token would be wiped
+                # out and the next refresh would fail.
+                if ($response.refresh_token) {
+                    $context.RefreshToken = $response.refresh_token
+                }
             }
             'ClientSecret' {
                 $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($context.ClientSecret)

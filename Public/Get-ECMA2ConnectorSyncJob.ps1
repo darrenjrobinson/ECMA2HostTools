@@ -78,7 +78,11 @@ function Get-ECMA2ConnectorSyncJob {
                 # EntryLevelErrors), so it can't be used on its own to tell a run is in
                 # progress. A run is in progress when it has a start time but no end time
                 # after it - the same comparison the Entra portal shows as "In progress".
-                $hasOpenExecution = $timeBegan -and (-not $timeEnded -or $timeEnded -lt $timeBegan)
+                # Compare the UTC instants, not the local values: during the daylight-saving
+                # fall-back hour a later instant can have an earlier local clock time.
+                $timeBeganUtc = ConvertTo-ECMA2LocalDateTime -Value $lastExecution.timeBegan -AsUtc
+                $timeEndedUtc = ConvertTo-ECMA2LocalDateTime -Value $lastExecution.timeEnded -AsUtc
+                $hasOpenExecution = $timeBeganUtc -and (-not $timeEndedUtc -or $timeEndedUtc -lt $timeBeganUtc)
                 $isRunning = ($lastExecution.state -in @('InProgress', 'Pending')) -or
                     ($hasOpenExecution -and $status.code -notin @('Paused', 'NotConfigured'))
 

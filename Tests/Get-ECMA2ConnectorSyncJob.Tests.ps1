@@ -90,7 +90,7 @@ Describe 'Get-ECMA2ConnectorSyncJob' {
                         code          = $env:ECMA2_TEST_CODE
                         lastExecution = [PSCustomObject]@{
                             state     = 'Failed'
-                            timeBegan = '2026-01-01T00:37:36Z'
+                            timeBegan = $(if ($env:ECMA2_TEST_BEGAN) { $env:ECMA2_TEST_BEGAN } else { '2026-01-01T00:37:36Z' })
                             timeEnded = $(if ($env:ECMA2_TEST_ENDED) { $env:ECMA2_TEST_ENDED } else { $null })
                         }
                         quarantine    = $null
@@ -102,7 +102,31 @@ Describe 'Get-ECMA2ConnectorSyncJob' {
         }
 
         AfterEach {
-            Remove-Item Env:\ECMA2_TEST_CODE, Env:\ECMA2_TEST_ENDED -ErrorAction SilentlyContinue
+            Remove-Item Env:\ECMA2_TEST_CODE, Env:\ECMA2_TEST_ENDED, Env:\ECMA2_TEST_BEGAN -ErrorAction SilentlyContinue
+        }
+
+        It 'Should mark IsRunning false for a completed run that spans the daylight-saving fall-back hour' {
+            # Find the instant in 2026 where the local zone's UTC offset drops (clocks go
+            # back). A run from 10 minutes before to 10 minutes after it ends at an
+            # earlier local clock time than it began. In a zone without daylight saving
+            # no such instant exists and this is just an ordinary completed run.
+            $zone = [System.TimeZoneInfo]::Local
+            $instant = New-Object datetime 2026, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc)
+            $fallBack = $instant.AddDays(180)
+            for ($hour = 0; $hour -lt 8760; $hour++) {
+                $next = $instant.AddHours(1)
+                if ($zone.GetUtcOffset($next) -lt $zone.GetUtcOffset($instant)) {
+                    $fallBack = $next
+                    break
+                }
+                $instant = $next
+            }
+            $env:ECMA2_TEST_BEGAN = $fallBack.AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $env:ECMA2_TEST_ENDED = $fallBack.AddMinutes(10).ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.IsRunning | Should Be $false
+            $result.LastExecutionTime.Kind | Should Be ([System.DateTimeKind]::Local)
         }
 
         It 'Should mark IsRunning true when the last execution has no end time' {

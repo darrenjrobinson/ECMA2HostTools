@@ -30,9 +30,8 @@ Describe 'Get-ECMA2ConnectorSyncJob' {
                     schedule   = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }
                     status     = [PSCustomObject]@{
                         code          = 'Active'
-                        lastExecution = [PSCustomObject]@{ state = 'Succeeded'; timeBegan = '2026-01-01T00:00:00Z' }
+                        lastExecution = [PSCustomObject]@{ state = 'Succeeded'; timeBegan = '2026-01-01T00:00:00Z'; timeEnded = '2026-01-01T00:10:00Z' }
                         quarantine    = $null
-                        escrows       = @()
                     }
                 }
             }
@@ -70,7 +69,6 @@ Describe 'Get-ECMA2ConnectorSyncJob' {
                         code          = 'Active'
                         lastExecution = [PSCustomObject]@{ state = 'InProgress'; timeBegan = '2026-01-01T00:00:00Z' }
                         quarantine    = $null
-                        escrows       = @()
                     }
                 }
             }
@@ -79,13 +77,223 @@ Describe 'Get-ECMA2ConnectorSyncJob' {
         }
     }
 
+    Context 'Running Detection From Execution Times' {
+        # $script: variables aren't visible inside module-scoped mocks, so each case
+        # passes its values through environment variables.
+        BeforeEach {
+            Mock Invoke-ECMA2GraphRequest -ModuleName ECMA2HostTools -MockWith {
+                [PSCustomObject]@{
+                    id         = 'job1'
+                    templateId = 'template1'
+                    schedule   = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }
+                    status     = [PSCustomObject]@{
+                        code          = $env:ECMA2_TEST_CODE
+                        lastExecution = [PSCustomObject]@{
+                            state     = 'Failed'
+                            timeBegan = $(if ($env:ECMA2_TEST_BEGAN) { $env:ECMA2_TEST_BEGAN } else { '2026-01-01T00:37:36Z' })
+                            timeEnded = $(if ($env:ECMA2_TEST_ENDED) { $env:ECMA2_TEST_ENDED } else { $null })
+                        }
+                        quarantine    = $null
+                    }
+                }
+            }
+            $env:ECMA2_TEST_CODE = 'Active'
+            $env:ECMA2_TEST_ENDED = ''
+        }
+
+        AfterEach {
+            Remove-Item Env:\ECMA2_TEST_CODE, Env:\ECMA2_TEST_ENDED, Env:\ECMA2_TEST_BEGAN -ErrorAction SilentlyContinue
+        }
+
+        It 'Should mark IsRunning false for a completed run that spans the daylight-saving fall-back hour' {
+            # Find the instant in 2026 where the local zone's UTC offset drops (clocks go
+            # back). A run from 10 minutes before to 10 minutes after it ends at an
+            # earlier local clock time than it began. In a zone without daylight saving
+            # no such instant exists and this is just an ordinary completed run.
+            $zone = [System.TimeZoneInfo]::Local
+            $instant = New-Object datetime 2026, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc)
+            $fallBack = $instant.AddDays(180)
+            for ($hour = 0; $hour -lt 8760; $hour++) {
+                $next = $instant.AddHours(1)
+                if ($zone.GetUtcOffset($next) -lt $zone.GetUtcOffset($instant)) {
+                    $fallBack = $next
+                    break
+                }
+                $instant = $next
+            }
+            $env:ECMA2_TEST_BEGAN = $fallBack.AddMinutes(-10).ToString('yyyy-MM-ddTHH:mm:ssZ')
+            $env:ECMA2_TEST_ENDED = $fallBack.AddMinutes(10).ToString('yyyy-MM-ddTHH:mm:ssZ')
+
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.IsRunning | Should Be $false
+            $result.LastExecutionTime.Kind | Should Be ([System.DateTimeKind]::Local)
+        }
+
+        It 'Should mark IsRunning true when the last execution has no end time' {
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.IsRunning | Should Be $true
+            ($null -eq $result.LastExecutionEndTime) | Should Be $true
+        }
+
+        It 'Should mark IsRunning true when the end time is the 0001-01-01 placeholder' {
+            $env:ECMA2_TEST_ENDED = '0001-01-01T00:00:00Z'
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.IsRunning | Should Be $true
+            ($null -eq $result.LastExecutionEndTime) | Should Be $true
+        }
+
+        It 'Should mark IsRunning true when the end time is earlier than the start time' {
+            $env:ECMA2_TEST_ENDED = '2026-01-01T00:22:51Z'
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.IsRunning | Should Be $true
+        }
+
+        It 'Should mark IsRunning false when the end time is after the start time' {
+            $env:ECMA2_TEST_ENDED = '2026-01-01T00:45:00Z'
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.IsRunning | Should Be $false
+        }
+
+        It 'Should mark IsRunning false for a paused job even with no end time' {
+            $env:ECMA2_TEST_CODE = 'Paused'
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.IsRunning | Should Be $false
+        }
+    }
+
+    Context 'Timestamps and Escrows' {
+        BeforeEach {
+            Mock Invoke-ECMA2GraphRequest -ModuleName ECMA2HostTools -MockWith {
+                [PSCustomObject]@{
+                    id         = 'job1'
+                    templateId = 'template1'
+                    schedule   = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }
+                    status     = [PSCustomObject]@{
+                        code                        = 'Active'
+                        escrowsPruned               = $false
+                        steadyStateLastAchievedTime = '2026-01-01T02:00:00Z'
+                        lastExecution               = [PSCustomObject]@{
+                            state            = 'EntryLevelErrors'
+                            timeBegan        = '2026-01-01T00:00:00Z'
+                            timeEnded        = '2026-01-01T00:10:00Z'
+                            countEscrowed    = 1447
+                            countEscrowedRaw = 1450
+                        }
+                        lastSuccessfulExecution     = [PSCustomObject]@{ timeEnded = '2025-12-31T23:00:00Z' }
+                        quarantine                  = $null
+                    }
+                }
+            }
+        }
+
+        It 'Should convert an ISO 8601 UTC string to a local DateTime' {
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $expected = (New-Object datetime 2026, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            ($result.LastExecutionTime -is [datetime]) | Should Be $true
+            $result.LastExecutionTime.Kind | Should Be ([System.DateTimeKind]::Local)
+            $result.LastExecutionTime | Should Be $expected
+        }
+
+        It 'Should convert the other timestamps to local time' {
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.LastExecutionEndTime | Should Be (New-Object datetime 2026, 1, 1, 0, 10, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.LastSuccessfulExecutionTime | Should Be (New-Object datetime 2025, 12, 31, 23, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.SteadyStateLastAchievedTime | Should Be (New-Object datetime 2026, 1, 1, 2, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+        }
+
+        It 'Should convert a UTC DateTime (as deserialized by PowerShell 7) to local time' {
+            Mock Invoke-ECMA2GraphRequest -ModuleName ECMA2HostTools -MockWith {
+                [PSCustomObject]@{
+                    id         = 'job1'
+                    templateId = 'template1'
+                    schedule   = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }
+                    status     = [PSCustomObject]@{
+                        code          = 'Active'
+                        lastExecution = [PSCustomObject]@{
+                            state     = 'Succeeded'
+                            timeBegan = (New-Object datetime 2026, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc))
+                        }
+                        quarantine    = $null
+                    }
+                }
+            }
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.LastExecutionTime.Kind | Should Be ([System.DateTimeKind]::Local)
+            $result.LastExecutionTime | Should Be (New-Object datetime 2026, 1, 1, 0, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+        }
+
+        It 'Should return null timestamps when Graph supplies none' {
+            Mock Invoke-ECMA2GraphRequest -ModuleName ECMA2HostTools -MockWith {
+                [PSCustomObject]@{
+                    id         = 'job1'
+                    templateId = 'template1'
+                    schedule   = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }
+                    status     = [PSCustomObject]@{
+                        code          = 'NotRun'
+                        lastExecution = [PSCustomObject]@{ state = $null; timeBegan = $null }
+                        quarantine    = $null
+                    }
+                }
+            }
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            ($null -eq $result.LastExecutionTime) | Should Be $true
+            ($null -eq $result.LastSuccessfulExecutionTime) | Should Be $true
+        }
+
+        It 'Should return the escrow counts from the last execution' {
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.EscrowCount | Should Be 1447
+            $result.EscrowCountRaw | Should Be 1450
+            $result.EscrowsPruned | Should Be $false
+        }
+
+        It 'Should convert quarantine timestamps to local time and keep the other details' {
+            Mock Invoke-ECMA2GraphRequest -ModuleName ECMA2HostTools -MockWith {
+                [PSCustomObject]@{
+                    id         = 'job1'
+                    templateId = 'template1'
+                    schedule   = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }
+                    status     = [PSCustomObject]@{
+                        code          = 'Quarantine'
+                        lastExecution = [PSCustomObject]@{ state = 'Failed'; timeBegan = '2026-01-01T00:00:00Z'; timeEnded = '2026-01-01T00:10:00Z' }
+                        quarantine    = [PSCustomObject]@{
+                            currentBegan = '2026-01-01T01:00:00Z'
+                            nextAttempt  = (New-Object datetime 2026, 1, 1, 3, 0, 0, ([System.DateTimeKind]::Utc))
+                            reason       = 'EncounteredEscrowProportionThreshold'
+                            seriesBegan  = '2026-01-01T00:30:00Z'
+                            seriesCount  = 2
+                            error        = $null
+                        }
+                    }
+                }
+            }
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.Quarantine.currentBegan | Should Be (New-Object datetime 2026, 1, 1, 1, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.Quarantine.nextAttempt | Should Be (New-Object datetime 2026, 1, 1, 3, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.Quarantine.seriesBegan | Should Be (New-Object datetime 2026, 1, 1, 0, 30, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.Quarantine.nextAttempt.Kind | Should Be ([System.DateTimeKind]::Local)
+            $result.Quarantine.reason | Should Be 'EncounteredEscrowProportionThreshold'
+            $result.Quarantine.seriesCount | Should Be 2
+        }
+
+        It 'Should return a null Quarantine when the job is not quarantined' {
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            ($null -eq $result.Quarantine) | Should Be $true
+        }
+
+        It 'Should not return the old Escrows property' {
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            ($result.PSObject.Properties.Name -contains 'Escrows') | Should Be $false
+        }
+    }
+
     Context 'List Jobs' {
         It 'Should return multiple jobs when JobId is omitted' {
             Mock Invoke-ECMA2GraphRequest -ModuleName ECMA2HostTools -MockWith {
                 [PSCustomObject]@{
                     value = @(
-                        [PSCustomObject]@{ id = 'job1'; templateId = 't1'; schedule = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }; status = [PSCustomObject]@{ code = 'Active'; lastExecution = [PSCustomObject]@{ state = 'Succeeded'; timeBegan = $null }; quarantine = $null; escrows = @() } },
-                        [PSCustomObject]@{ id = 'job2'; templateId = 't2'; schedule = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }; status = [PSCustomObject]@{ code = 'Active'; lastExecution = [PSCustomObject]@{ state = 'Succeeded'; timeBegan = $null }; quarantine = $null; escrows = @() } }
+                        [PSCustomObject]@{ id = 'job1'; templateId = 't1'; schedule = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }; status = [PSCustomObject]@{ code = 'Active'; lastExecution = [PSCustomObject]@{ state = 'Succeeded'; timeBegan = $null }; quarantine = $null } },
+                        [PSCustomObject]@{ id = 'job2'; templateId = 't2'; schedule = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }; status = [PSCustomObject]@{ code = 'Active'; lastExecution = [PSCustomObject]@{ state = 'Succeeded'; timeBegan = $null }; quarantine = $null } }
                     )
                 }
             }

@@ -1,0 +1,82 @@
+name: Publish to PowerShell Gallery
+
+# Publishes whenever the manifest version on master is ahead of the PowerShell Gallery.
+# Requires a repository secret named PSGALLERY_API_KEY
+# (Settings > Secrets and variables > Actions > New repository secret).
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'ECMA2HostTools.psd1'
+      - 'ECMA2HostTools.psm1'
+      - 'ECMA2HostTools.Format.ps1xml'
+      - 'Public/**'
+      - 'Private/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-psgallery
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # Keep line endings exactly as committed so Authenticode signatures stay valid
+      - name: Disable line ending conversion
+        run: git config --global core.autocrlf false
+
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Stage module package
+        id: package
+        run: |
+          $package = ./New-ModulePackage.ps1 -Destination $env:RUNNER_TEMP
+          "path=$package" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      # Nothing is published unless the staged package has a valid manifest and imports cleanly
+      - name: Test module package
+        env:
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: |
+          $manifestPath = Join-Path $env:PACKAGE_PATH 'ECMA2HostTools.psd1'
+          $manifest = Test-ModuleManifest -Path $manifestPath -ErrorAction Stop
+          Import-Module $manifestPath -Force -ErrorAction Stop
+
+          $expected = @($manifest.ExportedFunctions.Keys)
+          $missing = $expected | Where-Object { -not (Get-Command -Module ECMA2HostTools -Name $_ -ErrorAction SilentlyContinue) }
+          if ($missing) {
+            throw "Functions listed in the manifest were not exported: $($missing -join ', ')"
+          }
+          Write-Host "ECMA2HostTools $($manifest.Version) imported with $($expected.Count) functions"
+
+      # Publishes whenever the manifest version is ahead of the gallery, so a failed publish is retried next run
+      - name: Publish to PowerShell Gallery
+        env:
+          PSGALLERY_API_KEY: ${{ secrets.PSGALLERY_API_KEY }}
+          PACKAGE_PATH: ${{ steps.package.outputs.path }}
+        run: |
+          $moduleName = 'ECMA2HostTools'
+          $localVersion = [version](Import-PowerShellDataFile (Join-Path $env:PACKAGE_PATH "$moduleName.psd1")).ModuleVersion
+          $galleryVersion = [version](Find-PSResource -Name $moduleName -Repository PSGallery).Version.ToString()
+          Write-Host "Local version: $localVersion  Gallery version: $galleryVersion"
+
+          if ($localVersion -le $galleryVersion) {
+            Write-Host 'Gallery is up to date. Nothing to publish.'
+            return
+          }
+          if (-not $env:PSGALLERY_API_KEY) {
+            Write-Host '::warning::PSGALLERY_API_KEY secret is not set. Skipping publish.'
+            return
+          }
+
+          Publish-PSResource -Path $env:PACKAGE_PATH -Repository PSGallery -ApiKey $env:PSGALLERY_API_KEY
+          Write-Host "Published $moduleName $localVersion"

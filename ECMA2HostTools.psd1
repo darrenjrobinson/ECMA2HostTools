@@ -3,7 +3,7 @@
     RootModule        = 'ECMA2HostTools.psm1'
 
     # Version number of this module.
-    ModuleVersion     = '1.2.0'
+    ModuleVersion     = '1.3.0'
 
     # ID used to uniquely identify this module
     GUID              = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890'
@@ -71,7 +71,7 @@
             # LicenseUri = ''
 
             # A URL to the main website for this project.
-            ProjectUri = 'https://github.com/darrenjrobinson'
+            ProjectUri = 'https://github.com/darrenjrobinson/ECMA2HostTools'
 
             # A URL to an icon representing this module.
             # IconUri = ''

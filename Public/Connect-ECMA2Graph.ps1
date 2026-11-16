@@ -96,16 +96,34 @@ function Connect-ECMA2Graph {
         [SecureString]$AccessToken
     )
 
+    # One web session shared by every call for this connection, so (on PowerShell 7.4+)
+    # the underlying HTTP connection is pooled and reused. Without it each request opens a
+    # new connection, and on hosts where IPv6 resolves but doesn't route, every connection
+    # waits out the IPv6 attempts (minutes) before falling back to IPv4 - long enough for
+    # device code polling to stall and sign-in to fail with AADSTS70008.
+    $webSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+
     try {
         switch ($PSCmdlet.ParameterSetName) {
             'Interactive' {
                 $deviceCodeEndpoint = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/devicecode"
                 $tokenEndpoint = "https://login.microsoftonline.com/$TenantId/oauth2/v2.0/token"
 
+                Write-Verbose "Requesting device code from $deviceCodeEndpoint"
+                $requestStart = Get-Date
                 $deviceCodeResponse = Invoke-RestMethod -Method Post -Uri $deviceCodeEndpoint -Body @{
                     client_id = $ClientId
                     scope     = ($Scopes -join ' ')
-                } -ContentType 'application/x-www-form-urlencoded'
+                } -ContentType 'application/x-www-form-urlencoded' -WebSession $webSession
+
+                $requestSeconds = [int]((Get-Date) - $requestStart).TotalSeconds
+                Write-Verbose "Device code request took $requestSeconds seconds"
+                if ($requestSeconds -gt 15) {
+                    Write-Warning ("Connecting to login.microsoftonline.com took $requestSeconds seconds. " +
+                        "This is usually IPv6 being resolved but not routable, forcing a slow fallback to IPv4. " +
+                        "To prefer IPv4 system-wide (admin, reboot required): " +
+                        "New-ItemProperty HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters -Name DisabledComponents -Value 0x20 -PropertyType DWord -Force")
+                }
 
                 Write-Host $deviceCodeResponse.message -ForegroundColor Cyan
 
@@ -120,7 +138,7 @@ function Connect-ECMA2Graph {
                             grant_type  = 'urn:ietf:params:oauth:grant-type:device_code'
                             client_id   = $ClientId
                             device_code = $deviceCodeResponse.device_code
-                        } -ContentType 'application/x-www-form-urlencoded'
+                        } -ContentType 'application/x-www-form-urlencoded' -WebSession $webSession
                         break
                     }
                     catch {
@@ -157,6 +175,7 @@ function Connect-ECMA2Graph {
                     ClientSecret = $null
                     Scopes       = $Scopes
                     ExpiresOn    = (Get-Date).AddSeconds($tokenResponse.expires_in)
+                    WebSession   = $webSession
                 }
             }
             'ClientSecret' {
@@ -170,7 +189,7 @@ function Connect-ECMA2Graph {
                     client_id     = $ClientId
                     client_secret = $plainSecret
                     scope         = 'https://graph.microsoft.com/.default'
-                } -ContentType 'application/x-www-form-urlencoded'
+                } -ContentType 'application/x-www-form-urlencoded' -WebSession $webSession
 
                 $script:ECMA2GraphContext = [PSCustomObject]@{
                     AuthMode     = 'ClientSecret'
@@ -182,6 +201,7 @@ function Connect-ECMA2Graph {
                     ClientSecret = $ClientSecret
                     Scopes       = @('https://graph.microsoft.com/.default')
                     ExpiresOn    = (Get-Date).AddSeconds($tokenResponse.expires_in)
+                    WebSession   = $webSession
                 }
             }
             'Certificate' {
@@ -207,7 +227,7 @@ function Connect-ECMA2Graph {
                     client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
                     client_assertion      = $assertion
                     scope                 = 'https://graph.microsoft.com/.default'
-                } -ContentType 'application/x-www-form-urlencoded'
+                } -ContentType 'application/x-www-form-urlencoded' -WebSession $webSession
 
                 $script:ECMA2GraphContext = [PSCustomObject]@{
                     AuthMode     = 'Certificate'
@@ -219,6 +239,7 @@ function Connect-ECMA2Graph {
                     ClientSecret = $null
                     Scopes       = @('https://graph.microsoft.com/.default')
                     ExpiresOn    = (Get-Date).AddSeconds($tokenResponse.expires_in)
+                    WebSession   = $webSession
                 }
             }
             'AccessToken' {
@@ -256,6 +277,7 @@ function Connect-ECMA2Graph {
                     ClientSecret = $null
                     Scopes       = @()
                     ExpiresOn    = $expiresOn
+                    WebSession   = $webSession
                 }
                 Write-Warning "Bring-your-own access token cannot be automatically refreshed. Reconnect with a fresh token if requests start failing with 401 or once ExpiresOn ($expiresOn) passes."
             }

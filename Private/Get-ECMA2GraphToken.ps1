@@ -37,7 +37,7 @@ function Get-ECMA2GraphToken {
                     client_id     = $context.ClientId
                     refresh_token = $context.RefreshToken
                     scope         = ($context.Scopes -join ' ')
-                } -ContentType 'application/x-www-form-urlencoded'
+                } -ContentType 'application/x-www-form-urlencoded' -WebSession $context.WebSession
                 # Some refresh responses omit refresh_token (the identity platform may
                 # reuse the existing one) - only overwrite it when a new value is
                 # actually returned, otherwise the cached refresh token would be wiped
@@ -56,7 +56,7 @@ function Get-ECMA2GraphToken {
                     client_id     = $context.ClientId
                     client_secret = $plainSecret
                     scope         = 'https://graph.microsoft.com/.default'
-                } -ContentType 'application/x-www-form-urlencoded'
+                } -ContentType 'application/x-www-form-urlencoded' -WebSession $context.WebSession
             }
             'Certificate' {
                 $assertion = New-ECMA2GraphClientAssertion -ClientId $context.ClientId -TenantId $context.TenantId -Certificate $context.Certificate
@@ -66,7 +66,7 @@ function Get-ECMA2GraphToken {
                     client_assertion_type = 'urn:ietf:params:oauth:client-assertion-type:jwt-bearer'
                     client_assertion      = $assertion
                     scope                 = 'https://graph.microsoft.com/.default'
-                } -ContentType 'application/x-www-form-urlencoded'
+                } -ContentType 'application/x-www-form-urlencoded' -WebSession $context.WebSession
             }
             'AccessToken' {
                 throw "The current connection uses a bring-your-own access token and cannot be refreshed automatically. Run Connect-ECMA2Graph -AccessToken with a fresh token."

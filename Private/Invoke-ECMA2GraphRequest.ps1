@@ -41,6 +41,11 @@ function Invoke-ECMA2GraphRequest {
         Headers = @{ Authorization = "Bearer $token" }
     }
 
+    # Reuse the connection's web session so the HTTP connection is pooled across calls
+    if ($script:ECMA2GraphContext.WebSession) {
+        $params.WebSession = $script:ECMA2GraphContext.WebSession
+    }
+
     if ($Body) {
         $params.Body = $Body | ConvertTo-Json -Depth 10
         $params.ContentType = 'application/json'

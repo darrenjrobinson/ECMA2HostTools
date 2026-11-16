@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [1.3.0] - 2026-11-17
 
 ### Fixed
-- `Get-ECMA2ConnectorSyncJob` returned `LastExecutionTime` in UTC (or as a raw string on Windows PowerShell 5.1). Timestamps are now `DateTime` values in the system's local time zone
+- `Get-ECMA2ConnectorSyncJob` returned `LastExecutionTime` in UTC (or as a raw string on Windows PowerShell 5.1). Timestamps are now `DateTime` values in the system's local time zone, including `currentBegan`, `nextAttempt` and `seriesBegan` inside `Quarantine`
 - `Get-ECMA2ConnectorSyncJob` always returned an empty `Escrows` property, because Microsoft Graph has no such property on the job status. The escrow count is now read from the job's last execution
 - `Get-ECMA2ConnectorSyncJob` reported `IsRunning` as false while a cycle was in progress, because Microsoft Graph's `lastExecution.state` only reports a result (`Succeeded`, `Failed`, `EntryLevelErrors`). `IsRunning` is now also true when the last execution has a start time but no end time after it. This also affects the running-job guards in `Restart-ECMA2ConnectorSyncJob` and `Start-ECMA2ConnectorSyncJob`
 

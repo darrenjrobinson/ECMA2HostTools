@@ -223,6 +223,40 @@ Describe 'Get-ECMA2ConnectorSyncJob' {
             $result.EscrowsPruned | Should Be $false
         }
 
+        It 'Should convert quarantine timestamps to local time and keep the other details' {
+            Mock Invoke-ECMA2GraphRequest -ModuleName ECMA2HostTools -MockWith {
+                [PSCustomObject]@{
+                    id         = 'job1'
+                    templateId = 'template1'
+                    schedule   = [PSCustomObject]@{ state = 'Active'; interval = 'PT40M' }
+                    status     = [PSCustomObject]@{
+                        code          = 'Quarantine'
+                        lastExecution = [PSCustomObject]@{ state = 'Failed'; timeBegan = '2026-01-01T00:00:00Z'; timeEnded = '2026-01-01T00:10:00Z' }
+                        quarantine    = [PSCustomObject]@{
+                            currentBegan = '2026-01-01T01:00:00Z'
+                            nextAttempt  = (New-Object datetime 2026, 1, 1, 3, 0, 0, ([System.DateTimeKind]::Utc))
+                            reason       = 'EncounteredEscrowProportionThreshold'
+                            seriesBegan  = '2026-01-01T00:30:00Z'
+                            seriesCount  = 2
+                            error        = $null
+                        }
+                    }
+                }
+            }
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            $result.Quarantine.currentBegan | Should Be (New-Object datetime 2026, 1, 1, 1, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.Quarantine.nextAttempt | Should Be (New-Object datetime 2026, 1, 1, 3, 0, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.Quarantine.seriesBegan | Should Be (New-Object datetime 2026, 1, 1, 0, 30, 0, ([System.DateTimeKind]::Utc)).ToLocalTime()
+            $result.Quarantine.nextAttempt.Kind | Should Be ([System.DateTimeKind]::Local)
+            $result.Quarantine.reason | Should Be 'EncounteredEscrowProportionThreshold'
+            $result.Quarantine.seriesCount | Should Be 2
+        }
+
+        It 'Should return a null Quarantine when the job is not quarantined' {
+            $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
+            ($null -eq $result.Quarantine) | Should Be $true
+        }
+
         It 'Should not return the old Escrows property' {
             $result = Get-ECMA2ConnectorSyncJob -ServicePrincipalId '11111111-1111-1111-1111-111111111111' -JobId 'job1'
             ($result.PSObject.Properties.Name -contains 'Escrows') | Should Be $false

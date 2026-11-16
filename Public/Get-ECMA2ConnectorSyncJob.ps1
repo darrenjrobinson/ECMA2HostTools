@@ -16,7 +16,8 @@ function Get-ECMA2ConnectorSyncJob {
         result Graph reports for that execution and can read Failed or Succeeded
         while a run is still in progress.
 
-        Timestamps are returned as DateTime values in the system's local time zone.
+        Timestamps are returned as DateTime values in the system's local time zone,
+        including currentBegan, nextAttempt and seriesBegan inside Quarantine.
         EscrowCount and EscrowCountRaw come from the job's last execution;
         EscrowCountRaw also includes system-generated escrows.
 
@@ -81,8 +82,24 @@ function Get-ECMA2ConnectorSyncJob {
                 $isRunning = ($lastExecution.state -in @('InProgress', 'Pending')) -or
                     ($hasOpenExecution -and $status.code -notin @('Paused', 'NotConfigured'))
 
+                # Quarantine details keep Graph's property names; only the timestamps are
+                # converted to local time
+                $quarantine = $status.quarantine
+                if ($quarantine) {
+                    $quarantineProperties = [ordered]@{}
+                    foreach ($property in $quarantine.PSObject.Properties) {
+                        $quarantineProperties[$property.Name] = if ($property.Name -in @('currentBegan', 'nextAttempt', 'seriesBegan')) {
+                            ConvertTo-ECMA2LocalDateTime -Value $property.Value
+                        }
+                        else {
+                            $property.Value
+                        }
+                    }
+                    $quarantine = [PSCustomObject]$quarantineProperties
+                }
+
                 [PSCustomObject]@{
-                    PSTypeName                  = 'ECMA2Host.SyncJob'
+                    PSTypeName                 = 'ECMA2Host.SyncJob'
                     Id                          = $job.id
                     TemplateId                  = $job.templateId
                     ServicePrincipalId          = $ServicePrincipalId
@@ -95,7 +112,7 @@ function Get-ECMA2ConnectorSyncJob {
                     LastExecutionEndTime        = $timeEnded
                     LastSuccessfulExecutionTime = ConvertTo-ECMA2LocalDateTime -Value $status.lastSuccessfulExecution.timeEnded
                     SteadyStateLastAchievedTime = ConvertTo-ECMA2LocalDateTime -Value $status.steadyStateLastAchievedTime
-                    Quarantine                  = $status.quarantine
+                    Quarantine                  = $quarantine
                     EscrowCount                 = $lastExecution.countEscrowed
                     EscrowCountRaw              = $lastExecution.countEscrowedRaw
                     EscrowsPruned               = $status.escrowsPruned

@@ -1,5 +1,8 @@
 # ECMA2HostTools PowerShell Module
 
+[![PSGallery Version](https://img.shields.io/powershellgallery/v/ECMA2HostTools.svg?style=flat&logo=powershell&label=PSGallery%20Version)](https://www.powershellgallery.com/packages/ECMA2HostTools) [![PSGallery Downloads](https://img.shields.io/powershellgallery/dt/ECMA2HostTools.svg?style=flat&logo=powershell&label=PSGallery%20Downloads)](https://www.powershellgallery.com/packages/ECMA2HostTools)
+
+
 A PowerShell module for orchestrating ECMA2Host and its connectors in Microsoft Entra ID OnPremises ECMA Application environments.
 
 ## Overview
